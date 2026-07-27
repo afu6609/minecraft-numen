@@ -32,7 +32,38 @@ npm start
 The official Codex SDK reuses the CLI's cached ChatGPT login. No API key is
 needed for this mode. `NUMEN_MCP_URL` is rejected unless it is loopback by
 default. The classifier and gameplay model are separate, configurable values;
-the defaults are `gpt-5.4-mini` and `gpt-5.4`.
+the defaults are `gpt-5.4-mini` at low reasoning and `gpt-5.6-luna` at high
+reasoning. The gameplay persona lives in `persona/momo.md` and is injected into
+every handled event.
+
+## Restricted operator commands
+
+The command bridge is disabled until `MOMO_COMMAND_PLAYERS` contains an exact
+Minecraft player name. For this private server:
+
+```dotenv
+MOMO_COMMAND_PLAYERS=Haa258
+```
+
+An authorized player must use an explicit line such as:
+
+```text
+桃桃执行指令 /time set day
+```
+
+The Node sidecar checks the event's `playerName` before calling the command
+tool. The Forge server then independently parses and rebuilds the command from
+a semantic allowlist. It permits only:
+
+- `/time set|add ...`
+- `/weather clear|rain|thunder [duration]`
+- `/tp <player>` or `/tp <x> <y> <z>` for Momo herself
+- `/gamemode <mode>` for Momo herself
+- `/difficulty <level>`
+
+Selectors, extra targets, nested commands, and destructive or privilege
+commands are rejected. The gameplay model cannot see or call `run_command`;
+only the deterministic command gateway can use it.
 
 Run one polling cycle for deployment checks with:
 

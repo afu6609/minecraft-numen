@@ -26,6 +26,15 @@ function reasoningEffort(env, key, fallback) {
   return value;
 }
 
+function commaSeparated(env, key) {
+  return Object.freeze(
+    (env[key] ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+}
+
 export function loadConfig(env = process.env, cwd = process.cwd()) {
   const mcpUrl = new URL(nonEmpty(env, "NUMEN_MCP_URL", "http://127.0.0.1:8765/mcp"));
   if (mcpUrl.protocol !== "http:" && mcpUrl.protocol !== "https:") {
@@ -36,19 +45,21 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
       "NUMEN_MCP_URL must remain loopback-only unless MOMO_ALLOW_REMOTE_MCP=true",
     );
   }
+  const workingDirectory = path.resolve(env.MOMO_WORKING_DIRECTORY?.trim() || cwd);
 
   return Object.freeze({
     mcpUrl: mcpUrl.toString(),
     mcpToken: env.NUMEN_MCP_TOKEN?.trim() ?? "",
     companion: nonEmpty(env, "MOMO_COMPANION", "momo"),
     classifierModel: nonEmpty(env, "MOMO_CLASSIFIER_MODEL", "gpt-5.4-mini"),
-    agentModel: nonEmpty(env, "MOMO_AGENT_MODEL", "gpt-5.4"),
+    agentModel: nonEmpty(env, "MOMO_AGENT_MODEL", "gpt-5.6-luna"),
     classifierReasoning: reasoningEffort(
       env,
       "MOMO_CLASSIFIER_REASONING",
       "low",
     ),
-    agentReasoning: reasoningEffort(env, "MOMO_AGENT_REASONING", "medium"),
+    agentReasoning: reasoningEffort(env, "MOMO_AGENT_REASONING", "high"),
+    commandPlayers: commaSeparated(env, "MOMO_COMMAND_PLAYERS"),
     pollIntervalMs: integer(env, "MOMO_POLL_INTERVAL_MS", 750, {
       min: 250,
       max: 60_000,
@@ -68,6 +79,10 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
       { min: 10, max: 3_600 },
     ),
     codexPath: env.CODEX_PATH?.trim() || undefined,
-    workingDirectory: path.resolve(env.MOMO_WORKING_DIRECTORY?.trim() || cwd),
+    workingDirectory,
+    personaFile: path.resolve(
+      workingDirectory,
+      env.MOMO_PERSONA_FILE?.trim() || "persona/momo.md",
+    ),
   });
 }

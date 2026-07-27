@@ -48,6 +48,14 @@ export class NumenMcpClient {
     return events;
   }
 
+  async sendChat(companion, message) {
+    return this.callTool("send_chat", { companion, message });
+  }
+
+  async runCommand(companion, command) {
+    return this.callTool("run_command", { companion, command });
+  }
+
   async #request(method, params) {
     const id = this.nextId++;
     const headers = {

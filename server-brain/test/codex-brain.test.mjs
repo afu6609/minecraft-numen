@@ -44,16 +44,23 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
   );
   assert.deepEqual(
     constructed[1].config.mcp_servers.numen.disabled_tools,
-    ["poll_server_events", "create_companion", "delete_companion"],
+    [
+      "poll_server_events",
+      "create_companion",
+      "delete_companion",
+      "run_command",
+    ],
   );
 });
 
 test("brain makes one corrective turn when the agent forgets visible chat", async () => {
   let turns = 0;
+  const prompts = [];
   const brain = new MomoBrain(
     () => ({
-      async run() {
+      async run(prompt) {
         turns += 1;
+        prompts.push(prompt);
         return {
           items:
             turns === 1
@@ -70,6 +77,7 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
       },
     }),
     "momo",
+    "你是游戏玩家桃桃。",
   );
 
   await brain.handle(
@@ -78,4 +86,7 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   );
 
   assert.equal(turns, 2);
+  assert.match(prompts[0], /你是游戏玩家桃桃/);
+  assert.match(prompts[0], /"playerName":"Alex"/);
+  assert.match(prompts[0], /playerName and playerUuid/);
 });

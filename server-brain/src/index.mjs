@@ -1,9 +1,14 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 import { createCodexRuntimes } from "./codex-brain.mjs";
 import { loadConfig } from "./config.mjs";
 import { NumenMcpClient } from "./mcp-client.mjs";
+import {
+  parseServerCommandRequest,
+  ServerCommandGateway,
+} from "./server-command.mjs";
 
 function log(level, message, details = {}) {
   const entry = {
@@ -19,7 +24,12 @@ async function verifyMcp(client) {
   await client.initialize();
   const tools = await client.listTools();
   const names = new Set(tools.map((tool) => tool.name));
-  for (const required of ["list_companions", "poll_server_events", "send_chat"]) {
+  for (const required of [
+    "list_companions",
+    "poll_server_events",
+    "send_chat",
+    "run_command",
+  ]) {
     if (!names.has(required)) {
       throw new Error(
         `Numen MCP is missing ${required}; install the matching momo/server-agent numen-api build`,
@@ -41,7 +51,10 @@ export async function run({
   await verifyMcp(client);
 
   const { Codex } = await importCodex();
-  const { router, brain } = createCodexRuntimes(Codex, config);
+  const persona = (await readFile(config.personaFile, "utf8")).trim();
+  if (persona === "") throw new Error("MOMO_PERSONA_FILE must not be empty");
+  const { router, brain } = createCodexRuntimes(Codex, config, persona);
+  const commandGateway = new ServerCommandGateway(client, config.companion);
   const once = argv.includes("--once");
   let stopping = false;
   const stop = () => {
@@ -55,6 +68,8 @@ export async function run({
     companion: config.companion,
     classifierModel: config.classifierModel,
     agentModel: config.agentModel,
+    agentReasoning: config.agentReasoning,
+    commandPlayers: config.commandPlayers,
   });
 
   let consecutiveErrors = 0;
@@ -63,16 +78,42 @@ export async function run({
     try {
       if (pending.length === 0) {
         const events = await client.pollServerEvents(config.eventBatchSize);
-        pending.push(...events.map((event) => ({ event, decision: null })));
+        pending.push(
+          ...events.map((event) => ({
+            event,
+            decision: null,
+            commandRequest: parseServerCommandRequest(
+              event,
+              config.commandPlayers,
+            ),
+          })),
+        );
       }
-      if (pending.some((item) => item.decision == null)) {
-        const decisions = await router.classify(pending.map((item) => item.event));
-        for (let index = 0; index < pending.length; index += 1) {
-          pending[index].decision = decisions[index];
+      const unclassified = pending.filter(
+        (item) => item.commandRequest == null && item.decision == null,
+      );
+      if (unclassified.length > 0) {
+        const decisions = await router.classify(
+          unclassified.map((item) => item.event),
+        );
+        for (let index = 0; index < unclassified.length; index += 1) {
+          unclassified[index].decision = decisions[index];
         }
       }
       while (pending.length > 0) {
-        const { event, decision } = pending[0];
+        const { event, decision, commandRequest } = pending[0];
+        if (commandRequest != null) {
+          const result = await commandGateway.handle(event, commandRequest);
+          log(result.ok ? "info" : "warn", "server command handled", {
+            eventId: event.id,
+            player: event.playerName,
+            command: commandRequest.command,
+            ok: result.ok,
+            reason: result.reason,
+          });
+          pending.shift();
+          continue;
+        }
         log("info", "chat routed", {
           eventId: event.id,
           player: event.playerName,
