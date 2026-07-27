@@ -90,3 +90,37 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   assert.match(prompts[0], /"playerName":"Alex"/);
   assert.match(prompts[0], /playerName and playerUuid/);
 });
+
+test("task completion returns to the persistent brain for verification", async () => {
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        prompts.push(prompt);
+        return {
+          items: [{
+            type: "mcp_tool_call",
+            server: "numen",
+            tool: "send_chat",
+            status: "completed",
+          }],
+        };
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  await brain.handleTaskEvent({
+    id: 13,
+    type: "task_finished",
+    taskId: "t7",
+    taskName: "goto",
+    status: "done",
+    message: "arrived",
+  });
+
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Re-perceive the live world/);
+  assert.match(prompts[0], /"taskId":"t7"/);
+});

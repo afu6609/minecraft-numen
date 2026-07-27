@@ -19,6 +19,20 @@ If the route is reply, answer naturally and concisely through send_chat as ${com
 When the request depends on the speaker's condition or location, call get_player_status with Event.playerName; use look_around_player when the blocks around that human matter. Do not assume every speaker is the companion owner.`;
 }
 
+function taskEventPrompt(companion, event, persona) {
+  return `A background Minecraft action you previously started has now ended.
+
+Companion body: ${JSON.stringify(companion)}
+Task event: ${JSON.stringify(event)}
+
+Your in-world identity and behavior:
+<persona>
+${persona}
+</persona>
+
+This task event is authoritative. Reconstruct the player's original goal from this same thread. Re-perceive the live world before claiming success. If the original goal is complete, report it naturally with send_chat. If it is incomplete and a safe bounded next action is obvious, continue it using the Numen tools; do not repeat the same failed action without new evidence or a changed approach. If the task failed or timed out and recovery is not justified, explain the obstacle briefly. Never expose hidden reasoning or backend terms.`;
+}
+
 function sentChat(turn) {
   return turn.items.some(
     (item) =>
@@ -51,6 +65,25 @@ export class MomoBrain {
     }
     if (!sentChat(turn)) {
       throw new Error(`agent handled event ${event.id} without calling send_chat`);
+    }
+  }
+
+  async handleTaskEvent(event) {
+    if (event.status === "stopped") return;
+    if (this.thread == null) this.thread = this.startThread();
+
+    let turn = await this.thread.run(
+      taskEventPrompt(this.companion, event, this.persona),
+    );
+    if (!sentChat(turn)) {
+      turn = await this.thread.run(
+        `Task event ${event.id} still has no player-visible update. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, recovery update, or obstacle. Do not only describe what you would say.`,
+      );
+    }
+    if (!sentChat(turn)) {
+      throw new Error(
+        `agent handled task event ${event.id} without calling send_chat`,
+      );
     }
   }
 }

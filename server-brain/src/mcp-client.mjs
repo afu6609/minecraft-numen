@@ -56,6 +56,10 @@ export class NumenMcpClient {
     return this.callTool("run_command", { companion, command });
   }
 
+  async stopTask(companion) {
+    return this.callTool("task_stop", { companion });
+  }
+
   async #request(method, params) {
     const id = this.nextId++;
     const headers = {

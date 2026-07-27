@@ -22,6 +22,8 @@ import com.dwinovo.numen.core.task.EatCompanionTask;
 import com.dwinovo.numen.core.task.EatItemTaskRecord;
 import com.dwinovo.numen.core.task.EquipCompanionTask;
 import com.dwinovo.numen.core.task.EquipTaskRecord;
+import com.dwinovo.numen.core.task.FollowPlayerCompanionTask;
+import com.dwinovo.numen.core.task.FollowPlayerTaskRecord;
 import com.dwinovo.numen.core.task.MeleeAttackCompanionTask;
 import com.dwinovo.numen.core.task.MeleeAttackTaskRecord;
 import com.dwinovo.numen.core.task.RangedAttackCompanionTask;
@@ -109,6 +111,7 @@ public final class NumenCore {
         // Registration ORDER is preserved (backends with prompt-caching keyed off
         // the tool list cache stably across requests).
         ToolRegistry.register(new com.dwinovo.numen.core.tools.MoveToTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.FollowPlayerTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.MeleeAttackTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.RangedAttackTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LocateStructureTool());
@@ -145,6 +148,7 @@ public final class NumenCore {
 
     private static void registerTaskRunners() {
         CompanionTaskFactory.register(MoveToTaskRecord.class, (p, r) -> new MoveToCompanionTask(p, r));
+        CompanionTaskFactory.register(FollowPlayerTaskRecord.class, (p, r) -> new FollowPlayerCompanionTask(p, r));
         CompanionTaskFactory.register(MineBlockTaskRecord.class, (p, r) -> new MineCompanionTask(p, r));
         CompanionTaskFactory.register(EquipTaskRecord.class, (p, r) -> new EquipCompanionTask(p, r));
         CompanionTaskFactory.register(DropItemsTaskRecord.class, (p, r) -> new DropCompanionTask(p, r));

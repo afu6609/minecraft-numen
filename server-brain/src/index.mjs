@@ -9,6 +9,10 @@ import {
   parseServerCommandRequest,
   ServerCommandGateway,
 } from "./server-command.mjs";
+import {
+  parseStopRequest,
+  ServerControlGateway,
+} from "./server-control.mjs";
 
 function log(level, message, details = {}) {
   const entry = {
@@ -29,6 +33,8 @@ async function verifyMcp(client) {
     "poll_server_events",
     "send_chat",
     "run_command",
+    "task_stop",
+    "follow_player",
   ]) {
     if (!names.has(required)) {
       throw new Error(
@@ -55,6 +61,7 @@ export async function run({
   if (persona === "") throw new Error("MOMO_PERSONA_FILE must not be empty");
   const { router, brain } = createCodexRuntimes(Codex, config, persona);
   const commandGateway = new ServerCommandGateway(client, config.companion);
+  const controlGateway = new ServerControlGateway(client, config.companion);
   const once = argv.includes("--once");
   let stopping = false;
   const stop = () => {
@@ -82,6 +89,7 @@ export async function run({
           ...events.map((event) => ({
             event,
             decision: null,
+            controlRequest: parseStopRequest(event),
             commandRequest: parseServerCommandRequest(
               event,
               config.commandPlayers,
@@ -90,7 +98,11 @@ export async function run({
         );
       }
       const unclassified = pending.filter(
-        (item) => item.commandRequest == null && item.decision == null,
+        (item) =>
+          item.event.type === "player_chat" &&
+          item.controlRequest == null &&
+          item.commandRequest == null &&
+          item.decision == null,
       );
       if (unclassified.length > 0) {
         const decisions = await router.classify(
@@ -101,7 +113,39 @@ export async function run({
         }
       }
       while (pending.length > 0) {
-        const { event, decision, commandRequest } = pending[0];
+        const { event, decision, controlRequest, commandRequest } = pending[0];
+        if (event.type === "task_finished") {
+          log("info", "background task finished", {
+            eventId: event.id,
+            companion: event.companionName,
+            taskId: event.taskId,
+            task: event.taskName,
+            status: event.status,
+          });
+          await brain.handleTaskEvent(event);
+          pending.shift();
+          continue;
+        }
+        if (event.type !== "player_chat") {
+          log("warn", "unknown server event ignored", {
+            eventId: event.id,
+            type: event.type,
+          });
+          pending.shift();
+          continue;
+        }
+        if (controlRequest != null) {
+          const result = await controlGateway.handle(event, controlRequest);
+          log(result.ok ? "info" : "warn", "server control handled", {
+            eventId: event.id,
+            player: event.playerName,
+            control: controlRequest.type,
+            ok: result.ok,
+            reason: result.reason,
+          });
+          pending.shift();
+          continue;
+        }
         if (commandRequest != null) {
           const result = await commandGateway.handle(event, commandRequest);
           log(result.ok ? "info" : "warn", "server command handled", {

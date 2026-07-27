@@ -1,8 +1,104 @@
 const COMMAND_REQUEST =
   /^(?:桃桃|momo)\s*[,，:：]?\s*执行指令(?:\s*[:：]\s*|\s+)(\/.+)$/iu;
+const ADDRESSED = /^(?:桃桃|momo)\s*[,，:：]?\s*(.+?)\s*[。！!？?]*$/iu;
+
+const TIME_VALUES = new Map([
+  ["白天", "day"],
+  ["天亮", "day"],
+  ["夜晚", "night"],
+  ["晚上", "night"],
+  ["正午", "noon"],
+  ["中午", "noon"],
+  ["午夜", "midnight"],
+]);
+const WEATHER_VALUES = new Map([
+  ["晴天", "clear"],
+  ["晴朗", "clear"],
+  ["下雨", "rain"],
+  ["雨天", "rain"],
+  ["雷雨", "thunder"],
+  ["雷暴", "thunder"],
+]);
+const DIFFICULTY_VALUES = new Map([
+  ["和平", "peaceful"],
+  ["简单", "easy"],
+  ["普通", "normal"],
+  ["困难", "hard"],
+]);
+const GAME_MODE_VALUES = new Map([
+  ["生存", "survival"],
+  ["创造", "creative"],
+  ["冒险", "adventure"],
+  ["旁观", "spectator"],
+]);
 
 function normalizedNames(names) {
   return new Set(names.map((name) => name.trim().toLocaleLowerCase()).filter(Boolean));
+}
+
+function naturalCommand(message, playerName) {
+  const addressed = message.trim().match(ADDRESSED);
+  if (addressed == null) return null;
+  const body = addressed[1].replace(/\s+/gu, "");
+
+  let match = body.match(
+    /^(?:帮我)?(?:把)?(?:时间|天色)(?:设(?:置)?|调(?:整)?|改|切换?)(?:成|为|到)?(白天|天亮|夜晚|晚上|正午|中午|午夜)$/u,
+  );
+  if (match != null) {
+    const value = TIME_VALUES.get(match[1]);
+    return {
+      command: `/time set ${value}`,
+      reply: `好，时间调到${match[1]}了。`,
+    };
+  }
+
+  match = body.match(
+    /^(?:帮我)?(?:把)?天气(?:设(?:置)?|调(?:整)?|改|切换?)(?:成|为|到)?(晴天|晴朗|下雨|雨天|雷雨|雷暴)$/u,
+  );
+  if (match != null) {
+    const value = WEATHER_VALUES.get(match[1]);
+    return {
+      command: `/weather ${value}`,
+      reply: `好，天气调成${match[1]}了。`,
+    };
+  }
+  if (/^(?:别下雨了?|让雨停(?:一下)?|雨停(?:一下)?)$/u.test(body)) {
+    return { command: "/weather clear", reply: "好，雨停了。" };
+  }
+
+  match = body.match(
+    /^(?:帮我)?(?:把)?难度(?:设(?:置)?|调(?:整)?|改|切换?)(?:成|为|到)?(和平|简单|普通|困难)(?:模式)?$/u,
+  );
+  if (match != null) {
+    const value = DIFFICULTY_VALUES.get(match[1]);
+    return {
+      command: `/difficulty ${value}`,
+      reply: `好，难度调成${match[1]}了。`,
+    };
+  }
+
+  match = body.match(
+    /^(?:帮我)?(?:让)?(?:你|自己)?(?:切换?|改)(?:成|为|到)?(生存|创造|冒险|旁观)(?:模式)?$/u,
+  );
+  if (match != null) {
+    const value = GAME_MODE_VALUES.get(match[1]);
+    return {
+      command: `/gamemode ${value}`,
+      reply: `好，我切到${match[1]}模式了。`,
+    };
+  }
+
+  if (
+    /^(?:过来|来我这(?:里|儿)|到我这(?:里|儿)|传送(?:到)?我这(?:里|儿)|传送到我身边)$/u.test(
+      body,
+    )
+  ) {
+    return {
+      command: `/tp ${playerName}`,
+      reply: "好，我过来了。",
+    };
+  }
+  return null;
 }
 
 export function parseServerCommandRequest(event, authorizedPlayers) {
@@ -14,12 +110,15 @@ export function parseServerCommandRequest(event, authorizedPlayers) {
     return null;
   }
   const match = event.message.trim().match(COMMAND_REQUEST);
-  if (match == null) return null;
+  const natural =
+    match == null ? naturalCommand(event.message, event.playerName.trim()) : null;
+  if (match == null && natural == null) return null;
   return Object.freeze({
-    command: match[1].trim(),
+    command: match == null ? natural.command : match[1].trim(),
     authorized: normalizedNames(authorizedPlayers).has(
       event.playerName.trim().toLocaleLowerCase(),
     ),
+    ...(natural?.reply ? { reply: natural.reply } : {}),
   });
 }
 
@@ -51,7 +150,7 @@ export class ServerCommandGateway {
       await this.client.runCommand(this.companion, request.command);
       await this.client.sendChat(
         this.companion,
-        `好，已执行 ${request.command.slice(0, 180)}。`,
+        request.reply ?? `好，已执行 ${request.command.slice(0, 180)}。`,
       );
       return { ok: true };
     } catch (error) {

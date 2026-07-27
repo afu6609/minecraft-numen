@@ -6,7 +6,7 @@ import {
   ServerCommandGateway,
 } from "../src/server-command.mjs";
 
-test("only explicit command wording is intercepted", () => {
+test("explicit and unambiguous natural command wording is intercepted", () => {
   const event = {
     type: "player_chat",
     playerName: "Haa258",
@@ -16,9 +16,20 @@ test("only explicit command wording is intercepted", () => {
     command: "/time set day",
     authorized: true,
   });
+  assert.deepEqual(
+    parseServerCommandRequest(
+      { ...event, message: "桃桃，帮我把时间设为白天" },
+      ["Haa258"],
+    ),
+    {
+      command: "/time set day",
+      authorized: true,
+      reply: "好，时间调到白天了。",
+    },
+  );
   assert.equal(
     parseServerCommandRequest(
-      { ...event, message: "桃桃，把时间调到白天" },
+      { ...event, message: "桃桃，现在是白天吗？" },
       ["Haa258"],
     ),
     null,
