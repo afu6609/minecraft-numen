@@ -35,6 +35,28 @@ real-time behavior stay deterministic in the Forge process. The model is called
 only for player messages, planning boundaries, significant failures, and task
 completion.
 
+## Optional client compatibility
+
+The dedicated-server build accepts clients that do not advertise Numen's custom
+network channel. The server skips Numen-only S2C payloads for those connections
+instead of disconnecting them.
+
+An unmodified Java client (including a Java mobile launcher such as Pojav) can:
+
+- join the server normally;
+- see the Momo fake-player body, skin/name, movement, mining, building, and
+  combat;
+- read Momo's `<momo> text` replies in ordinary chat form;
+- be observed by server-side tools, including current health, carried
+  inventory, position, and nearby terrain.
+
+It does not receive Numen's client UI, roster/HUD, inventory screen, death and
+respawn widgets, or path/debug overlays. A desktop client with the matching
+Numen protocol keeps those features. This optional channel applies only to
+Numen; another installed mod may still require its own client counterpart.
+Bedrock clients are a separate protocol and still need a bridge such as
+Geyser/Floodgate.
+
 ## Harness, skills, and MCP
 
 The whole assembly is an **agent harness**:
@@ -72,9 +94,9 @@ postconditions, timeouts, and recovery steps are part of every learned skill.
 
 1. Dedicated-server actuator and direct result routing in `numen-api`.
 2. Dedicated-server MCP lifecycle and loopback-only configuration.
-3. Ordinary server-chat ingress and family allowlist.
-4. Full player-status/inventory perception.
-5. Codex SDK sidecar with ChatGPT device login.
+3. Ordinary server-chat ingress with small-model routing.
+4. Full online-player status/inventory and nearby-terrain perception.
+5. Codex SDK sidecar reusing ChatGPT subscription login.
 6. Experience capture, candidate replay, validation, and promotion.
 7. Optional-client networking and mobile-client compatibility.
 8. Long-run tests, systemd deployment, monitoring, and rollback.

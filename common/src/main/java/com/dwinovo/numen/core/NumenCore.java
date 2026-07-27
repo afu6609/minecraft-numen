@@ -128,6 +128,8 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.CloseGuiTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetSelfStatusTool());   // SAMPLE: raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetOwnerStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.GetPlayerStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundPlayerTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LookupRecipeTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.CraftTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanNearbyEntitiesTool());
@@ -157,4 +159,3 @@ public final class NumenCore {
         CompanionTaskFactory.register(LocateBiomeTaskRecord.class, (p, r) -> new LocateBiomeTaskGoal(p, r));
     }
 }
-

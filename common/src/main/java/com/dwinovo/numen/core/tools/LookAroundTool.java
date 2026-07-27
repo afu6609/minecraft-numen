@@ -9,6 +9,7 @@ import com.dwinovo.numen.entity.NumenPlayer;
 import com.google.gson.JsonObject;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.LiquidBlock;
@@ -90,10 +91,10 @@ public final class LookAroundTool implements NumenTool {
         reply.accept(render(self, radius));
     }
 
-    private static String render(NumenPlayer self, int radius) {
-        BlockGetter view = LoadedOnlyView.of(self.level());
+    static String render(ServerPlayer player, int radius) {
+        BlockGetter view = LoadedOnlyView.of(player.level());
         LoadedOnlyView loaded = view instanceof LoadedOnlyView v ? v : null;
-        BlockPos center = PathExecutor.playerFeet(self);
+        BlockPos center = PathExecutor.playerFeet(player);
         int cx = center.getX();
         int cy = center.getY();
         int cz = center.getZ();
@@ -113,8 +114,9 @@ public final class LookAroundTool implements NumenTool {
 
         StringBuilder sb = new StringBuilder();
         sb.append("look_around center=(").append(cx).append(',').append(cy).append(',').append(cz)
-                .append(") facing=").append(self.getDirection().getName())
-                .append(" | 1 cell = 1 block, @ = you, North = up (-Z), East = right (+X)\n\n");
+                .append(") player=").append(player.getGameProfile().getName())
+                .append(" facing=").append(player.getDirection().getName())
+                .append(" | 1 cell = 1 block, @ = player, North = up (-Z), East = right (+X)\n\n");
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
                 sb.append(grid[r][c]);
@@ -124,7 +126,7 @@ public final class LookAroundTool implements NumenTool {
             }
             sb.append('\n');
         }
-        sb.append("\nlegend: @ you | . flat | ^ step-up 1 | , step-down 1-2 | v drop>=").append(DROP_DEPTH)
+        sb.append("\nlegend: @ player | . flat | ^ step-up 1 | , step-down 1-2 | v drop>=").append(DROP_DEPTH)
                 .append(" | # wall/blocked | ~ water | ! lava/hazard | x caution | T tree | ? unloaded\n")
                 .append("to route: trace cell by cell (. ^ , are walkable; # ~ ! v x block or endanger you).\n");
         return sb.toString();
