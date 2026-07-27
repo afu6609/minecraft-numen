@@ -25,7 +25,7 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
     agentToolTimeoutSeconds: 330,
     classifierModel: "small",
     agentModel: "main",
-    classifierReasoning: "minimal",
+    classifierReasoning: "low",
     agentReasoning: "medium",
     workingDirectory: "/srv/momo",
     companion: "momo",
@@ -37,6 +37,10 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
   assert.equal(
     constructed[1].config.mcp_servers.numen.bearer_token_env_var,
     "NUMEN_MCP_TOKEN",
+  );
+  assert.equal(
+    constructed[1].config.mcp_servers.numen.default_tools_approval_mode,
+    "approve",
   );
   assert.deepEqual(
     constructed[1].config.mcp_servers.numen.disabled_tools,

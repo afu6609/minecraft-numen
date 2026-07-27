@@ -1,6 +1,6 @@
 import path from "node:path";
 
-const REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const REASONING_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 function integer(env, key, fallback, { min, max }) {
@@ -46,7 +46,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     classifierReasoning: reasoningEffort(
       env,
       "MOMO_CLASSIFIER_REASONING",
-      "minimal",
+      "low",
     ),
     agentReasoning: reasoningEffort(env, "MOMO_AGENT_REASONING", "medium"),
     pollIntervalMs: integer(env, "MOMO_POLL_INTERVAL_MS", 750, {

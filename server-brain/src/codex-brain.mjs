@@ -64,6 +64,7 @@ export function createCodexRuntimes(Codex, config) {
     url: config.mcpUrl,
     required: true,
     tool_timeout_sec: config.agentToolTimeoutSeconds,
+    default_tools_approval_mode: "approve",
     disabled_tools: [
       "poll_server_events",
       "create_companion",

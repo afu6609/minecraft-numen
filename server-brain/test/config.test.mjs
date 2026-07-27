@@ -9,7 +9,19 @@ test("configuration defaults to loopback and split models", () => {
   assert.equal(config.mcpUrl, "http://127.0.0.1:8765/mcp");
   assert.equal(config.classifierModel, "gpt-5.4-mini");
   assert.equal(config.agentModel, "gpt-5.4");
+  assert.equal(config.classifierReasoning, "low");
   assert.equal(config.companion, "momo");
+});
+
+test("reasoning effort matches Codex-supported values", () => {
+  assert.equal(
+    loadConfig({ MOMO_CLASSIFIER_REASONING: "none" }).classifierReasoning,
+    "none",
+  );
+  assert.throws(
+    () => loadConfig({ MOMO_CLASSIFIER_REASONING: "minimal" }),
+    /must be one of none, low, medium, high, xhigh/,
+  );
 });
 
 test("remote MCP endpoints need explicit opt-in", () => {
