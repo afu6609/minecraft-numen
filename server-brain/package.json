@@ -1,0 +1,13 @@
+{
+  "name": "@momo/numen-server-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private dedicated-server harness for the Momo Numen companion.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
