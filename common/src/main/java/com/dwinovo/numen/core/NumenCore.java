@@ -120,6 +120,7 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.AutoMineTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.EquipItemTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.BuildTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.BreakBlockTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InteractAtTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InteractEntityTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.EatItemTool());
@@ -138,6 +139,7 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanNearbyEntitiesTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanBlocksTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.ObserveVolumeTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockStorageTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetWorldInfoTool());

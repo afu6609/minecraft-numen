@@ -71,6 +71,29 @@ Run one polling cycle for deployment checks with:
 node src/index.mjs --once
 ```
 
+## Autonomous player-action loop
+
+The gameplay model is the planner. It observes the live world, chooses a small
+bounded action, lets the normal fake-player body execute it, then observes the
+task result and replans in the same persistent Codex thread. It is not limited
+to selecting one opaque task macro.
+
+The low-level surface includes:
+
+- `observe_volume` for a precise, bounded 3D block snapshot;
+- `break_block` for one visible cell guarded by its freshly observed block id;
+- `build` for an explicit list of placements or `minecraft:air` removals;
+- movement, interaction, combat, inventory, crafting, and entity perception
+  primitives.
+
+`mine` remains a resource-gathering macro and has no coordinate boundary. The
+agent is explicitly forbidden from using it to demolish or edit structures.
+Unfamiliar destructive edits run in small verified checkpoints.
+
+Server chat polling runs independently from Codex turns. A direct stop phrase
+aborts the current SDK turn, cancels stale queued action chat, and calls
+`task_stop` on the companion body before acknowledging the player.
+
 ## Experience policy
 
 A successful task may be summarized into a candidate skill immediately.

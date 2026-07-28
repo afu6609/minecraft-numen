@@ -89,6 +89,8 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   assert.match(prompts[0], /你是游戏玩家桃桃/);
   assert.match(prompts[0], /"playerName":"Alex"/);
   assert.match(prompts[0], /playerName and playerUuid/);
+  assert.match(prompts[0], /observe_volume/);
+  assert.match(prompts[0], /mine tool is resource gathering only/);
 });
 
 test("task completion returns to the persistent brain for verification", async () => {
@@ -123,4 +125,38 @@ test("task completion returns to the persistent brain for verification", async (
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /Re-perceive the live world/);
   assert.match(prompts[0], /"taskId":"t7"/);
+});
+
+test("direct control interrupts an active Codex turn without a corrective retry", async () => {
+  let turns = 0;
+  let started;
+  const entered = new Promise((resolve) => {
+    started = resolve;
+  });
+  const brain = new MomoBrain(
+    () => ({
+      async run(_prompt, options) {
+        turns += 1;
+        started();
+        return await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            { once: true },
+          );
+        });
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  const handling = brain.handle(
+    { id: 14, playerName: "Alex", message: "跟着我" },
+    { id: 14, route: "act", reason: "follow request" },
+  );
+  await entered;
+  assert.equal(brain.interrupt(), true);
+  assert.deepEqual(await handling, { interrupted: true });
+  assert.equal(turns, 1);
 });

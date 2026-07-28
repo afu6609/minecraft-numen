@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { createCodexRuntimes } from "./codex-brain.mjs";
 import { loadConfig } from "./config.mjs";
+import { EventInbox } from "./event-inbox.mjs";
 import { NumenMcpClient } from "./mcp-client.mjs";
 import {
   parseServerCommandRequest,
@@ -79,30 +80,76 @@ export async function run({
     commandPlayers: config.commandPlayers,
   });
 
-  let consecutiveErrors = 0;
-  const pending = [];
-  do {
+  const inbox = new EventInbox();
+  let pollerError = null;
+  const poller = (async () => {
+    let consecutiveErrors = 0;
     try {
-      if (pending.length === 0) {
-        const events = await client.pollServerEvents(config.eventBatchSize);
-        pending.push(
-          ...events.map((event) => ({
-            event,
-            decision: null,
-            controlRequest: parseStopRequest(event),
-            commandRequest: parseServerCommandRequest(
+      do {
+        try {
+          const events = await client.pollServerEvents(config.eventBatchSize);
+          for (const event of events) {
+            const controlRequest = parseStopRequest(event);
+            const commandRequest = parseServerCommandRequest(
               event,
               config.commandPlayers,
-            ),
-          })),
-        );
-      }
+            );
+            if (controlRequest != null) {
+              inbox.cancelPlayerChatsThrough(event.id);
+              const interruptedTurn = brain.interrupt();
+              const result = await controlGateway.handle(event, controlRequest);
+              log(result.ok ? "info" : "warn", "server control handled", {
+                eventId: event.id,
+                player: event.playerName,
+                control: controlRequest.type,
+                interruptedTurn,
+                ok: result.ok,
+                reason: result.reason,
+              });
+              continue;
+            }
+            inbox.push({
+              event,
+              decision: null,
+              commandRequest,
+            });
+          }
+          consecutiveErrors = 0;
+          if (!once && !stopping) {
+            await delay(config.pollIntervalMs);
+          }
+        } catch (error) {
+          consecutiveErrors += 1;
+          log("error", "event poller failed", {
+            error: error instanceof Error ? error.message : String(error),
+            consecutiveErrors,
+          });
+          if (once) throw error;
+          const backoff = Math.min(
+            30_000,
+            1_000 * 2 ** Math.min(consecutiveErrors - 1, 5),
+          );
+          await delay(backoff);
+        }
+      } while (!once && !stopping);
+    } catch (error) {
+      pollerError = error;
+    } finally {
+      inbox.close();
+    }
+  })();
+
+  try {
+    while (true) {
+      const pending = await inbox.takeAll();
+      if (pending.length === 0 && inbox.closed) break;
+
       const unclassified = pending.filter(
         (item) =>
           item.event.type === "player_chat" &&
-          item.controlRequest == null &&
           item.commandRequest == null &&
-          item.decision == null,
+          item.decision == null &&
+          !inbox.isCancelled(item.event),
       );
       if (unclassified.length > 0) {
         const decisions = await router.classify(
@@ -112,8 +159,15 @@ export async function run({
           unclassified[index].decision = decisions[index];
         }
       }
-      while (pending.length > 0) {
-        const { event, decision, controlRequest, commandRequest } = pending[0];
+
+      for (const { event, decision, commandRequest } of pending) {
+        if (inbox.isCancelled(event)) {
+          log("info", "stale chat cancelled by direct stop", {
+            eventId: event.id,
+            player: event.playerName,
+          });
+          continue;
+        }
         if (event.type === "task_finished") {
           log("info", "background task finished", {
             eventId: event.id,
@@ -123,7 +177,6 @@ export async function run({
             status: event.status,
           });
           await brain.handleTaskEvent(event);
-          pending.shift();
           continue;
         }
         if (event.type !== "player_chat") {
@@ -131,19 +184,6 @@ export async function run({
             eventId: event.id,
             type: event.type,
           });
-          pending.shift();
-          continue;
-        }
-        if (controlRequest != null) {
-          const result = await controlGateway.handle(event, controlRequest);
-          log(result.ok ? "info" : "warn", "server control handled", {
-            eventId: event.id,
-            player: event.playerName,
-            control: controlRequest.type,
-            ok: result.ok,
-            reason: result.reason,
-          });
-          pending.shift();
           continue;
         }
         if (commandRequest != null) {
@@ -155,7 +195,6 @@ export async function run({
             ok: result.ok,
             reason: result.reason,
           });
-          pending.shift();
           continue;
         }
         log("info", "chat routed", {
@@ -165,23 +204,13 @@ export async function run({
           reason: decision.reason,
         });
         await brain.handle(event, decision);
-        pending.shift();
       }
-      consecutiveErrors = 0;
-      if (!once && !stopping) {
-        await delay(config.pollIntervalMs);
-      }
-    } catch (error) {
-      consecutiveErrors += 1;
-      log("error", "brain loop failed", {
-        error: error instanceof Error ? error.message : String(error),
-        consecutiveErrors,
-      });
-      if (once) throw error;
-      const backoff = Math.min(30_000, 1_000 * 2 ** Math.min(consecutiveErrors - 1, 5));
-      await delay(backoff);
     }
-  } while (!once && !stopping);
+  } finally {
+    stopping = true;
+    await poller;
+  }
+  if (pollerError != null) throw pollerError;
 
   log("info", "Momo server brain stopped");
 }

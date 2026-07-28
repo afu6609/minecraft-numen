@@ -27,14 +27,18 @@ public final class AutoMineTool implements NumenTool {
 
     @Override
     public String description() {
-        return "Gather blocks by type and count. Give block id(s) and how many ITEMS you want — it finds "
+        return "RESOURCE GATHERING ONLY: gather naturally occurring blocks by type and count. Never use "
+                + "this tool to demolish, edit, clear, repair, or undo a player-built structure: it has "
+                + "no coordinates or boundary and may choose any nearby matching block. Give block id(s) "
+                + "and how many ITEMS you want — it finds "
                 + "the nearest matches, travels to each with full terrain-traversing navigation (digs to "
                 + "buried ores, pillars up cliffs, bridges gaps), mines, and repeats until `count` NEW items "
                 + "are gained or none remain nearby. No coordinates or goto needed. count is items, not "
                 + "blocks (redstone_ore drops ~4). Include all variants in block_ids (iron_ore AND "
                 + "deepslate_iron_ore). Only mines what its tools actually harvest, and stops naming the "
-                + "needed tier if nothing qualifies (to destroy blocks regardless of drops, use "
-                + "break_block). BACKGROUND task: returns a task_id at once; the outcome arrives as a "
+                + "needed tier if nothing qualifies. For an exact visible cell use break_block; for a "
+                + "verified explicit list use build with minecraft:air. BACKGROUND task: returns a task_id "
+                + "at once; the outcome arrives as a "
                 + "task_finished event — don't poll.";
     }
 
