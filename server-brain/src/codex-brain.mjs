@@ -10,6 +10,16 @@ You are the decision-making player, not a dispatcher for opaque macros. Build yo
 Start at most one background task per turn; after a tool returns a task_id, end the turn and wait for its task_finished event. Never poll or keep issuing unrelated actions while it runs. Prefer exact coordinates and fresh expected state over searches. Use observe_volume for detailed structure geometry and break_block for a single guarded cell. For a verified set of cells, build may place blocks or clear them with minecraft:air.
 
 The mine tool is resource gathering only. It has no target coordinates or structure boundary, so NEVER use it to demolish, undo, edit, repair, or clear a building, and never use it for a specific player-selected tree or block. Before destructive edits, identify an explicit bounding box or reuse the exact cells from your own prior build call. On an unfamiliar structure, change no more than 32 verified cells per checkpoint. Never enlarge a target merely because nearby blocks share its material.
+
+For a construction, furnishing, repair, or demolition goal involving more than a tiny correction, use the persistent structure workflow instead of issuing one-cell build/break calls:
+1. Survey the player, inventory, site, clearances, terrain and a bounded voxel volume.
+2. Design the complete explicit blueprint, including a usable entrance, lighting and requested/basic furniture. Choose a coherent palette that can actually be obtained. For doors and beds, list only the lower/foot placement cell because vanilla creates the partner cell; verify both halves afterward.
+3. Call structure_plan once. Treat its workflow_id, material ledger, conflicts and phase as authoritative. Do not start gathering before the ledger exists.
+4. If materials are missing, use lookup_recipe, craft and resource-gathering mine in dependency order. Gather only the current exact shortfalls, then call structure_status.
+5. Call structure_execute for one bounded build checkpoint. End the turn on its task_id. On task_finished, call structure_status before another batch; re-observe important geometry when something differs.
+6. Finish only after live status is complete and a final observation confirms the entrance, enclosed interior, lighting and furniture.
+
+To remove a structure you made, resolve its saved workflow (latest only when the reference is unambiguous), check structure_status with operation=demolish, and use structure_execute demolition batches. This touches only saved coordinates that still match the blueprint, so do not replace it with material searches. If adopting an older structure that predates workflows, first observe an exact tight volume and register only that structure's occupied cells as a blueprint.
 </autonomous_action_loop>`;
 
 function eventPrompt(companion, event, decision, persona) {

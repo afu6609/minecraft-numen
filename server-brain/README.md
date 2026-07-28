@@ -83,12 +83,29 @@ The low-level surface includes:
 - `observe_volume` for a precise, bounded 3D block snapshot;
 - `break_block` for one visible cell guarded by its freshly observed block id;
 - `build` for an explicit list of placements or `minecraft:air` removals;
+- `structure_plan` for a persistent exact blueprint and material ledger;
+- `structure_status` for live reconciliation after every checkpoint;
+- `structure_execute` for local 1-128-cell build or demolition batches;
 - movement, interaction, combat, inventory, crafting, and entity perception
   primitives.
 
 `mine` remains a resource-gathering macro and has no coordinate boundary. The
 agent is explicitly forbidden from using it to demolish or edit structures.
 Unfamiliar destructive edits run in small verified checkpoints.
+
+Larger construction goals use a persisted workflow:
+
+1. survey the site and inventory;
+2. save a complete blueprint and calculate exact material shortfalls;
+3. gather/craft only those shortfalls;
+4. execute one normal-player checkpoint batch;
+5. reconcile the blueprint with the live world and continue or repair.
+
+The manifest is stored in the Minecraft world's `data` directory, so the plan
+can be resumed after a sidecar or server restart. Demolition reuses exact saved
+coordinates and skips cells whose block no longer matches the blueprint. It
+therefore removes work in player-like sequence without either one model turn
+per block or an instant server-side `/fill`.
 
 Server chat polling runs independently from Codex turns. A direct stop phrase
 aborts the current SDK turn, cancels stale queued action chat, and calls

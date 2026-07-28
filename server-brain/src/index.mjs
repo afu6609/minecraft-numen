@@ -66,7 +66,9 @@ export async function run({
   const once = argv.includes("--once");
   let stopping = false;
   const stop = () => {
+    if (stopping) return;
     stopping = true;
+    brain.interrupt();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

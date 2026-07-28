@@ -37,9 +37,15 @@ public final class BuildTool implements NumenTool {
     private static final long TICKS_PER_BLOCK = 20 * 20;
 
     private record Args(List<BlockSpec> blocks, Boolean replace_existing, Integer layer_height) {}
-    private record BlockSpec(String block_id, int x, int y, int z,
-                             String facing, String axis, String half,
-                             Map<String, String> properties) {}
+
+    /**
+     * Shared wire representation for an explicit blueprint cell. Package
+     * visibility lets the persistent structure workflow reuse the exact same
+     * validation and block-state parsing as the one-shot build tool.
+     */
+    record BlockSpec(String block_id, int x, int y, int z,
+                     String facing, String axis, String half,
+                     Map<String, String> properties) {}
 
     @Override
     public String name() {
@@ -62,29 +68,7 @@ public final class BuildTool implements NumenTool {
 
     @Override
     public Map<String, Object> parameterSchema() {
-        Map<String, Object> props = new LinkedHashMap<>();
-        props.put("block_id", Map.of(
-                "type", "string",
-                "description", "Namespaced id of the block item to place, e.g. minecraft:obsidian. "
-                        + "Use minecraft:air to clear/break whatever occupies the cell."));
-        props.put("x", Map.of("type", "integer", "description", "Target x."));
-        props.put("y", Map.of("type", "integer", "description", "Target y."));
-        props.put("z", Map.of("type", "integer", "description", "Target z."));
-        props.put("facing", enumSchema("Optional facing: north/south/east/west/up/down.",
-                "north", "south", "east", "west", "up", "down"));
-        props.put("axis", enumSchema("Optional pillar/log axis.", "x", "y", "z"));
-        props.put("half", enumSchema("Optional slab/stair half.", "top", "bottom"));
-        props.put("properties", Map.of(
-                "type", List.of("object", "null"),
-                "description", "Optional block-state properties by name, e.g. {\"open\":\"false\"}.",
-                "additionalProperties", Map.of("type", "string")));
-
-        Map<String, Object> item = new LinkedHashMap<>();
-        item.put("type", "object");
-        item.put("properties", props);
-        item.put("required", List.of("block_id", "x", "y", "z"));
-        item.put("additionalProperties", false);
-
+        Map<String, Object> item = blockSpecSchema();
         Map<String, Object> blocks = new LinkedHashMap<>();
         blocks.put("type", "array");
         blocks.put("description", "Explicit block cells to construct, in absolute world coordinates.");
@@ -107,6 +91,32 @@ public final class BuildTool implements NumenTool {
         root.put("required", List.of("blocks"));
         root.put("additionalProperties", false);
         return root;
+    }
+
+    static Map<String, Object> blockSpecSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("block_id", Map.of(
+                "type", "string",
+                "description", "Namespaced id of the block item to place, e.g. minecraft:obsidian. "
+                        + "Use minecraft:air to clear/break whatever occupies the cell."));
+        props.put("x", Map.of("type", "integer", "description", "Target x."));
+        props.put("y", Map.of("type", "integer", "description", "Target y."));
+        props.put("z", Map.of("type", "integer", "description", "Target z."));
+        props.put("facing", enumSchema("Optional facing: north/south/east/west/up/down.",
+                "north", "south", "east", "west", "up", "down"));
+        props.put("axis", enumSchema("Optional pillar/log axis.", "x", "y", "z"));
+        props.put("half", enumSchema("Optional slab/stair half.", "top", "bottom"));
+        props.put("properties", Map.of(
+                "type", List.of("object", "null"),
+                "description", "Optional block-state properties by name, e.g. {\"open\":\"false\"}.",
+                "additionalProperties", Map.of("type", "string")));
+
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("type", "object");
+        item.put("properties", props);
+        item.put("required", List.of("block_id", "x", "y", "z"));
+        item.put("additionalProperties", false);
+        return item;
     }
 
     private static Map<String, Object> enumSchema(String description, String... values) {
@@ -142,11 +152,15 @@ public final class BuildTool implements NumenTool {
     }
 
     static List<BuildTaskRecord.Target> parseTargets(List<BlockSpec> blocks) {
+        return parseTargets(blocks, MAX_BLOCKS);
+    }
+
+    static List<BuildTaskRecord.Target> parseTargets(List<BlockSpec> blocks, int maxBlocks) {
         if (blocks == null || blocks.isEmpty()) {
             throw new IllegalArgumentException("blocks must contain at least one cell");
         }
-        if (blocks.size() > MAX_BLOCKS) {
-            throw new IllegalArgumentException("build accepts at most " + MAX_BLOCKS + " cells");
+        if (blocks.size() > maxBlocks) {
+            throw new IllegalArgumentException("blueprint accepts at most " + maxBlocks + " cells");
         }
         List<BuildTaskRecord.Target> targets = new ArrayList<>(blocks.size());
         Set<BlockPos> seen = new LinkedHashSet<>();
@@ -191,7 +205,7 @@ public final class BuildTool implements NumenTool {
     }
 
 
-    private static BlockState applyProperties(BlockState state, Map<String, String> properties) {
+    static BlockState applyProperties(BlockState state, Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
             return state;
         }

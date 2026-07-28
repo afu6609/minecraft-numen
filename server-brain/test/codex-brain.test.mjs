@@ -91,6 +91,10 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   assert.match(prompts[0], /playerName and playerUuid/);
   assert.match(prompts[0], /observe_volume/);
   assert.match(prompts[0], /mine tool is resource gathering only/);
+  assert.match(prompts[0], /structure_plan once/);
+  assert.match(prompts[0], /material ledger/);
+  assert.match(prompts[0], /structure_execute/);
+  assert.match(prompts[0], /saved coordinates/);
 });
 
 test("task completion returns to the persistent brain for verification", async () => {
