@@ -197,7 +197,7 @@ public final class PlaceManeuver {
                         return Status.FAILED;
                     }
                 }
-                case NO_LINE_OF_SIGHT, OUT_OF_REACH -> {
+                case NO_LINE_OF_SIGHT, OUT_OF_REACH, STATE_MISMATCH -> {
                     // Positional: edge toward the nearest candidate face so one comes into
                     // view. The stance ladder above this maneuver is the real "different
                     // angle" mechanism — the body never oscillates here.

@@ -3,7 +3,10 @@ package com.dwinovo.numen.core.task;
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
 
 import net.minecraft.world.level.block.AirBlock;
+import net.minecraft.world.level.block.AbstractFurnaceBlock;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.CrossCollisionBlock;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.HorizontalDirectionalBlock;
 import net.minecraft.world.level.block.LiquidBlock;
@@ -84,7 +87,7 @@ public final class BuildValidity {
         for (Map.Entry<Property<?>, Comparable<?>> entry : firstValues.entrySet()) {
             Property<?> property = entry.getKey();
             if (entry.getValue() != secondValues.get(property)
-                    && !isNeighbourDerived(first, property)
+                    && !isWorldDerived(first, property)
                     && !(settings.buildIgnoreDirection && ORIENTATION_PROPERTIES.contains(property))
                     && !ignoredProps.contains(property.getName())) {
                 return false;
@@ -100,11 +103,12 @@ public final class BuildValidity {
      * item's default state. Treating those flips as a blueprint mismatch makes
      * the builder remove and replace the same correct block forever.
      *
-     * <p>Keep player-controlled state (facing, half, axis, waterlogged, open)
-     * strict; only ignore properties whose value vanilla derives from the
-     * surrounding world.</p>
+     * <p>Keep structural choices (facing, half, axis, hinge, waterlogged)
+     * strict. Ignore connection shapes and transient runtime state that vanilla
+     * can change after a correct placement (an opened door, an occupied bed, or
+     * a burning furnace).</p>
      */
-    private static boolean isNeighbourDerived(BlockState state, Property<?> property) {
+    private static boolean isWorldDerived(BlockState state, Property<?> property) {
         String name = property.getName();
         if (state.getBlock() instanceof CrossCollisionBlock) {
             return HORIZONTAL_CONNECTION_PROPERTIES.contains(name);
@@ -119,7 +123,16 @@ public final class BuildValidity {
             return "shape".equals(name);
         }
         if (state.getBlock() instanceof FenceGateBlock) {
-            return "in_wall".equals(name);
+            return "in_wall".equals(name) || "open".equals(name) || "powered".equals(name);
+        }
+        if (state.getBlock() instanceof DoorBlock || state.getBlock() instanceof TrapDoorBlock) {
+            return "open".equals(name) || "powered".equals(name);
+        }
+        if (state.getBlock() instanceof BedBlock) {
+            return "occupied".equals(name);
+        }
+        if (state.getBlock() instanceof AbstractFurnaceBlock) {
+            return "lit".equals(name);
         }
         return false;
     }

@@ -194,6 +194,45 @@ class BuildTaskRecordTest {
     }
 
     @Test
+    void transientRuntimeStatesDoNotInvalidateCorrectlyPlacedBlocks() {
+        assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
+
+        BlockState door = Blocks.OAK_DOOR.defaultBlockState();
+        assertTrue(BuildValidity.sameBlockState(
+                door, door.setValue(BlockStateProperties.OPEN, true)));
+        assertTrue(BuildValidity.sameBlockState(
+                door, door.setValue(BlockStateProperties.POWERED, true)));
+
+        BlockState trapdoor = Blocks.OAK_TRAPDOOR.defaultBlockState();
+        assertTrue(BuildValidity.sameBlockState(
+                trapdoor, trapdoor.setValue(BlockStateProperties.OPEN, true)));
+
+        BlockState gate = Blocks.OAK_FENCE_GATE.defaultBlockState();
+        assertTrue(BuildValidity.sameBlockState(
+                gate, gate.setValue(BlockStateProperties.OPEN, true)));
+
+        BlockState bed = Blocks.WHITE_BED.defaultBlockState();
+        assertTrue(BuildValidity.sameBlockState(
+                bed, bed.setValue(BlockStateProperties.OCCUPIED, true)));
+
+        BlockState furnace = Blocks.FURNACE.defaultBlockState();
+        assertTrue(BuildValidity.sameBlockState(
+                furnace, furnace.setValue(BlockStateProperties.LIT, true)));
+    }
+
+    @Test
+    void transientStateToleranceKeepsStructuralFacingStrict() {
+        assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
+        BlockState desired = Blocks.OAK_DOOR.defaultBlockState()
+                .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.NORTH);
+        BlockState openedWrongWay = desired
+                .setValue(BlockStateProperties.OPEN, true)
+                .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.EAST);
+
+        assertFalse(BuildValidity.sameBlockState(desired, openedWrongWay));
+    }
+
+    @Test
     void buildValidityCanIgnoreConfiguredProperties() {
         assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
         NavSettings.get().buildIgnoreProperties().add("waterlogged");
@@ -324,5 +363,4 @@ class BuildTaskRecordTest {
         @Override public int getMinBuildHeight() { return -64; }
     }
 }
-
 

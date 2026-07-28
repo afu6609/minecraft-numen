@@ -98,6 +98,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private int stallTicks;
     private int highWaterCompleted;
     private String note = "done";
+    private String lastPlacementDiagnostic;
     private BlockPos suspendedAt;
     private net.minecraft.resources.ResourceKey<Level> suspendedDimension;
 
@@ -151,6 +152,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         incorrectPositions = null;
         observedCompleted = new LongOpenHashSet();
         stallTicks = 0;
+        lastPlacementDiagnostic = null;
         registerProvider();
         updateCompleted();
         highWaterCompleted = r.completed();
@@ -176,6 +178,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         if (r.completed() > highWaterCompleted) {
             highWaterCompleted = r.completed();
             stallTicks = 0;
+            lastPlacementDiagnostic = null;
         } else if (++stallTicks >= STALL_LIMIT_TICKS) {
             fail("stalled: no build progress for " + (STALL_LIMIT_TICKS / 20) + "s ("
                     + note + "); completed " + r.completed() + "/" + r.targets.size(),
@@ -232,11 +235,16 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             case RUNNING -> TaskState.RUNNING;
             case ARRIVED -> {
                 stopNav();
-                if (!hasLocalWorkWindow()) {
+                boolean hasLocalWork = hasLocalWorkWindow();
+                if (!hasLocalWork) {
                     if (++emptyArrivalTicks >= MAX_EMPTY_ARRIVALS) {
-                        note = "waiting for a usable build angle";
+                        note = lastPlacementDiagnostic == null
+                                ? "waiting for a usable build angle"
+                                : lastPlacementDiagnostic;
                     } else {
-                        note = "rechecking nearby build angles";
+                        note = lastPlacementDiagnostic == null
+                                ? "rechecking nearby build angles"
+                                : lastPlacementDiagnostic;
                     }
                     yield TaskState.RUNNING;
                 } else {
@@ -248,8 +256,11 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                 String reason = nav.failReason();
                 emptyArrivalTicks = 0;
                 stopNav();
-                note = "waiting for a reachable build stance" + (reason == null || reason.isBlank()
-                        ? "" : ": " + reason);
+                String navFailure = "waiting for a reachable build stance"
+                        + (reason == null || reason.isBlank() ? "" : ": " + reason);
+                note = lastPlacementDiagnostic == null
+                        ? navFailure
+                        : lastPlacementDiagnostic + "; " + navFailure;
                 yield TaskState.RUNNING;
             }
         };
@@ -334,6 +345,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private TaskState tickPlace(LocalPlacement placement) {
         BuildTaskRecord.Target target = placement.target();
         if (targetMatches(player.level(), target)) {
+            lastPlacementDiagnostic = null;
             markObserved(target, true);
             return TaskState.RUNNING;
         }
@@ -359,6 +371,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         if (targetMatches(player.level(), target)) {
             r.placedOne();
             noSupport.clear();
+            lastPlacementDiagnostic = null;
             markObserved(target, true);
         } else {
             note = "waiting for the placed block to appear";
@@ -424,6 +437,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                     }
                     LocalPlacement placement = resolveLocalPlacement(target);
                     if (placement != null) {
+                        lastPlacementDiagnostic = null;
                         return placement;
                     }
                 }
@@ -434,18 +448,43 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     private LocalPlacement resolveLocalPlacement(BuildTaskRecord.Target target) {
         if (blockedByOtherEntity(target.pos(), target.desiredState())) {
+            rememberPlacementDiagnostic(target,
+                    "another entity occupies the required placement footprint");
+            return null;
+        }
+        if (!placementBlockSpaceAvailable(target.pos(), target.desiredState())) {
+            rememberPlacementDiagnostic(target,
+                    "its multi-block footprint is occupied or lacks required floor support");
             return null;
         }
         if (!placementPlausible(target.pos(), target.desiredState())) {
+            rememberPlacementDiagnostic(target,
+                    "my current body overlaps its placement footprint; I need to move clear of every target cell");
             return null;
         }
         PlaceResolution resolution = Placement.resolveDetailed(player, target.pos(), true, aimY(target),
                 hit -> matchingSlotForHit(target, hit, null, null, true) >= 0);
         if (!resolution.ok()) {
+            rememberPlacementDiagnostic(target, resolution.message());
             return null;
         }
         int slot = matchingSlotForHit(target, resolution.hit(), resolution.yaw(), resolution.pitch(), true);
-        return slot < 0 || !nextTickCanReach(resolution) ? null : new LocalPlacement(target, resolution, slot);
+        if (slot < 0) {
+            rememberPlacementDiagnostic(target,
+                    "a reachable support face exists, but using it cannot create the requested block state");
+            return null;
+        }
+        if (!nextTickCanReach(resolution)) {
+            rememberPlacementDiagnostic(target,
+                    "the selected support face cannot be kept under the crosshair while I turn toward it");
+            return null;
+        }
+        return new LocalPlacement(target, resolution, slot);
+    }
+
+    private void rememberPlacementDiagnostic(BuildTaskRecord.Target target, String detail) {
+        lastPlacementDiagnostic = "can't place " + target.label() + " at " + target.shortPos()
+                + ": " + detail;
     }
     private boolean canInterruptPath() {
         return player.onGround() && (nav == null || nav.isSafeToCancel());
@@ -531,12 +570,12 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         return LongSets.emptySet();
     }
 
-    private NavGoal placementGoal(BuildTaskRecord.Target target) {
+    private NavGoal placementGoal(BuildTaskRecord.Target target, Set<BlockPos> pendingFootprints) {
         BlockPos pos = target.pos();
         if (!player.level().getBlockState(pos).isAir()) {
             return goalPlace(pos);
         }
-        Set<BlockPos> excludedFeet = placementFootprintPositions(target);
+        Set<BlockPos> excludedFeet = pendingFootprints;
         boolean allowSameLevel = !player.level().getBlockState(pos.above()).isAir();
         for (Direction facing : PLACE_GOAL_FACES) {
             BlockPos against = pos.relative(facing);
@@ -1135,6 +1174,19 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         return positions;
     }
 
+    private Set<BlockPos> pendingPlacementFootprintPositions() {
+        Set<BlockPos> positions = new HashSet<>();
+        for (BuildTaskRecord.Target target : r.targets) {
+            if (isAirTarget(target)
+                    || (usesLayers() && target.pos().getY() > layerTop)
+                    || targetMatches(player.level(), target)) {
+                continue;
+            }
+            positions.addAll(placementFootprintPositions(target));
+        }
+        return positions;
+    }
+
     private static PlacementCell partnerCell(BuildTaskRecord.Target target) {
         List<PlacementCell> cells =
                 placementFootprint(target.pos(), target.desiredState());
@@ -1569,9 +1621,10 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
         NavGoal goal(BuildCompanionTask task) {
             List<NavGoal> toPlace = new ArrayList<>();
+            Set<BlockPos> pendingFootprints = task.pendingPlacementFootprintPositions();
             for (BuildTaskRecord.Target target : placeable) {
                 if (!hasPlaceable(target.pos().below()) && !hasPlaceable(target.pos().below(2))) {
-                    toPlace.add(task.placementGoal(target));
+                    toPlace.add(task.placementGoal(target, pendingFootprints));
                 }
             }
             for (BlockPos liquid : sourceLiquids) {

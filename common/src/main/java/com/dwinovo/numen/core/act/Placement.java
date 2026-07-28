@@ -161,6 +161,7 @@ public final class Placement {
         int rays = 0;
         boolean triedAny = false;        // at least one ray was actually spent
         boolean skippedForReach = false; // at least one candidate face was beyond reach
+        boolean[] verifierRejected = {false}; // a clear ray existed, but its state was wrong
         BlockPos[] occluder = {null};    // first non-face block a sample ray struck
         for (Direction dir : ranked) {
             if (rays >= RAY_BUDGET) break;
@@ -176,7 +177,8 @@ public final class Placement {
                 triedAny = true;
                 BlockHitResult hit = castFromEye(player, eye, point, reach, onFace, occluder);
                 rays++;
-                PlaceResolution accepted = acceptedHit(player, hit, hitVerifier, eye, point);
+                PlaceResolution accepted = acceptedHit(
+                        player, hit, hitVerifier, eye, point, verifierRejected);
                 if (accepted != null) return accepted;
             }
         }
@@ -191,7 +193,8 @@ public final class Placement {
             Vec3 targetCenter = blockCenter(level, placeAt);
             BlockHitResult hit = castFromEye(player, eye, targetCenter, reach, onTarget, occluder);
             rays++;
-            PlaceResolution accepted = acceptedHit(player, hit, hitVerifier, eye, targetCenter);
+            PlaceResolution accepted = acceptedHit(
+                    player, hit, hitVerifier, eye, targetCenter, verifierRejected);
             if (accepted != null) return accepted;
             for (int i = 0; i < BLOCK_SIDES.length && rays < RAY_BUDGET; i++) {
                 Vec3 m = BLOCK_SIDES[i];
@@ -201,7 +204,8 @@ public final class Placement {
                         placeAt.getZ() + shape.min(Direction.Axis.Z) * m.z + shape.max(Direction.Axis.Z) * (1 - m.z));
                 hit = castFromEye(player, eye, point, reach, onTarget, occluder);
                 rays++;
-                PlaceResolution sideAccepted = acceptedHit(player, hit, hitVerifier, eye, point);
+                PlaceResolution sideAccepted = acceptedHit(
+                        player, hit, hitVerifier, eye, point, verifierRejected);
                 if (sideAccepted != null) return sideAccepted;
             }
         }
@@ -211,6 +215,14 @@ public final class Placement {
         Direction best = !ranked.isEmpty() ? ranked.get(0)
                 : (!supports.isEmpty() ? supports.get(0) : null);
         Vec3 stance = best == null ? null : suggestStance(level, placeAt, best);
+        if (verifierRejected[0]) {
+            return PlaceResolution.failure(PlaceResolution.Reason.STATE_MISMATCH,
+                    "I can reach a support face at " + placeAt.toShortString()
+                            + ", but every reachable angle would create a different block state"
+                            + " (for example, the wrong facing or half). Approach from another side"
+                            + " or revise the requested state.",
+                    stance);
+        }
         if (!triedAny && skippedForReach) {
             return PlaceResolution.failure(PlaceResolution.Reason.OUT_OF_REACH,
                     "every support face at " + placeAt.toShortString()
@@ -225,7 +237,8 @@ public final class Placement {
 
     private static PlaceResolution acceptedHit(NumenPlayer player, BlockHitResult hit,
                                                Predicate<BlockHitResult> hitVerifier,
-                                               Vec3 eye, Vec3 point) {
+                                               Vec3 eye, Vec3 point,
+                                               boolean[] verifierRejected) {
         if (hit == null) {
             return null;
         }
@@ -239,7 +252,11 @@ public final class Placement {
         try {
             player.setYRot(yaw);
             player.setXRot(pitch);
-            return hitVerifier.test(hit) ? PlaceResolution.success(hit, yaw, pitch) : null;
+            if (hitVerifier.test(hit)) {
+                return PlaceResolution.success(hit, yaw, pitch);
+            }
+            verifierRejected[0] = true;
+            return null;
         } finally {
             player.setYRot(oldYaw);
             player.setXRot(oldPitch);

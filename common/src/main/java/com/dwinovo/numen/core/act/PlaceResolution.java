@@ -11,8 +11,9 @@ import net.minecraft.world.phys.Vec3;
  *
  * <p>The diagnosis replaces a bare {@code null}: the caller learns <em>why</em> (branchable
  * {@link Reason}), gets a human-readable {@link #message} it can surface to the model
- * verbatim, and — when the failure is positional ({@link Reason#NO_LINE_OF_SIGHT} /
- * {@link Reason#OUT_OF_REACH} with support present) — an optional {@link #suggestedStance}:
+     * verbatim, and — when the failure is positional ({@link Reason#NO_LINE_OF_SIGHT},
+     * {@link Reason#OUT_OF_REACH}, or {@link Reason#STATE_MISMATCH} with support present) —
+     * an optional {@link #suggestedStance}:
  * a standable spot from which the best support face should be visible, so the task layer
  * can walk straight to a computed answer instead of sampling blind stances.
  *
@@ -35,7 +36,10 @@ public record PlaceResolution(BlockHitResult hit, Float yaw, Float pitch, Reason
          *  usable face — the view is occluded from this stance. */
         NO_LINE_OF_SIGHT,
         /** Support exists but every candidate face is beyond interaction reach. */
-        OUT_OF_REACH
+        OUT_OF_REACH,
+        /** A support face is reachable, but the caller's verifier rejects every hit because
+         *  it would create the wrong state (for example, the wrong facing or slab half). */
+        STATE_MISMATCH
     }
 
     public PlaceResolution {
