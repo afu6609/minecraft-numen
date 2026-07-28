@@ -21,8 +21,11 @@ import java.util.Map;
 /** Live comparison between a saved structure blueprint and the loaded world. */
 final class StructureWorkflowAssessment {
 
+    private static final int SAMPLE_LIMIT = 12;
+
     final StructureWorkflowStore.Workflow workflow;
     final List<BuildTaskRecord.Target> buildCandidates = new ArrayList<>();
+    final List<BuildTaskRecord.Target> unloadedCandidates = new ArrayList<>();
     final List<BuildTaskRecord.Target> demolitionCandidates = new ArrayList<>();
     final List<BlockPos> buildConflicts = new ArrayList<>();
     final List<BlockPos> demolitionConflicts = new ArrayList<>();
@@ -42,8 +45,13 @@ final class StructureWorkflowAssessment {
         for (StructureWorkflowStore.Cell cell : workflow.cells) {
             BuildTaskRecord.Target target = StructureWorkflowStore.target(cell);
             BlockPos pos = target.pos();
-            if (!self.level().hasChunkAt(pos)) {
+            boolean footprintLoaded = MultiBlockPlacement
+                    .footprint(pos, target.desiredState())
+                    .stream()
+                    .allMatch(part -> self.level().hasChunkAt(part.pos()));
+            if (!footprintLoaded) {
                 out.unloaded++;
+                out.unloadedCandidates.add(target);
                 if (!target.desiredState().isAir()) {
                     out.neededMaterials.merge(target.item(), 1, Integer::sum);
                 }
@@ -81,6 +89,7 @@ final class StructureWorkflowAssessment {
         boolean demolition = "demolish".equals(operation);
         JsonObject root = new JsonObject();
         root.addProperty("workflow_id", workflow.id);
+        root.addProperty("revision", workflow.revision);
         root.addProperty("name", workflow.name);
         root.addProperty("goal", workflow.goal);
         root.addProperty("owner_companion", workflow.ownerName);
@@ -98,12 +107,16 @@ final class StructureWorkflowAssessment {
             progress.addProperty("already_air_or_blueprint_air", alreadyRemoved);
             progress.addProperty("conflicts_skipped", demolitionConflicts.size());
             progress.add("conflict_samples", positions(demolitionConflicts, 8));
+            progress.add("remaining_samples",
+                    targetSamples(demolitionCandidates, List.of(), SAMPLE_LIMIT));
         } else {
             progress.addProperty("matched", matched);
             progress.addProperty("remaining", buildCandidates.size() + unloaded);
             progress.addProperty("occupied_wrong", occupiedWrong);
             progress.addProperty("blocking_conflicts", buildConflicts.size());
             progress.add("conflict_samples", positions(buildConflicts, 8));
+            progress.add("remaining_samples",
+                    targetSamples(buildCandidates, unloadedCandidates, SAMPLE_LIMIT));
         }
         root.add("progress", progress);
         root.add("materials", materials(self));
@@ -205,6 +218,45 @@ final class StructureWorkflowAssessment {
             out.add(cell);
         }
         return out;
+    }
+
+    static JsonArray targetSamples(
+            List<BuildTaskRecord.Target> loaded,
+            List<BuildTaskRecord.Target> unloaded,
+            int limit) {
+        JsonArray out = new JsonArray();
+        appendTargetSamples(out, loaded, false, limit);
+        appendTargetSamples(out, unloaded, true, limit);
+        return out;
+    }
+
+    private static void appendTargetSamples(
+            JsonArray out,
+            List<BuildTaskRecord.Target> targets,
+            boolean unloaded,
+            int limit) {
+        for (BuildTaskRecord.Target target : targets) {
+            if (out.size() >= limit) {
+                return;
+            }
+            JsonObject sample = new JsonObject();
+            sample.addProperty("x", target.pos().getX());
+            sample.addProperty("y", target.pos().getY());
+            sample.addProperty("z", target.pos().getZ());
+            StructureWorkflowStore.StateSpec state =
+                    StructureWorkflowStore.StateSpec.from(target.desiredState());
+            sample.addProperty("block_id", state.blockId);
+            sample.addProperty("item_id",
+                    BuiltInRegistries.ITEM.getKey(target.item()).toString());
+            JsonObject properties = new JsonObject();
+            state.properties.forEach(properties::addProperty);
+            sample.add("state", properties);
+            if (target.facing() != null) {
+                sample.addProperty("facing", target.facing().getName());
+            }
+            sample.addProperty("unloaded", unloaded);
+            out.add(sample);
+        }
     }
 
     private static JsonObject pos(int x, int y, int z) {

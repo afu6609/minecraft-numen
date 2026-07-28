@@ -85,6 +85,10 @@ The low-level surface includes:
 - `build` for an explicit list of placements or `minecraft:air` removals;
 - `structure_plan` for a persistent exact blueprint and material ledger;
 - `structure_status` for live reconciliation after every checkpoint;
+- `placement_feasibility` for a read-only check of exact requested state,
+  support, footprint, entities, line of sight, and real standable positions;
+- `structure_patch` for an atomic local blueprint revision using
+  `expected_revision`, `upsert`, and `remove_positions`;
 - `structure_execute` for local 1-128-cell build or demolition batches;
 - movement, interaction, combat, inventory, crafting, and entity perception
   primitives.
@@ -99,7 +103,23 @@ Larger construction goals use a persisted workflow:
 2. save a complete blueprint and calculate exact material shortfalls;
 3. gather/craft only those shortfalls;
 4. execute one normal-player checkpoint batch;
-5. reconcile the blueprint with the live world and continue or repair.
+5. reconcile the blueprint with the live world;
+6. for a failed state-sensitive cell, run `structure_status →`
+   `placement_feasibility`; only when preflight recommends a blueprint change,
+   continue with `structure_patch → placement_feasibility → structure_execute`.
+
+`structure_plan` is only for the initial complete blueprint or an intentional
+complete redesign. A local correction never resends the whole manifest:
+`structure_patch` changes only affected cells and rejects stale revisions.
+Placement preflight returns at most one directly usable patch per call; apply
+it atomically and preflight the new revision before requesting another repair.
+
+The recovery loop tracks the exact target coordinate, requested block state,
+and failure reason. A move by itself does not refresh that evidence, and a
+second identical failure exhausts the unchanged-placement retry budget. A
+successful structure patch refreshes the budget. Body-defense interruptions
+retain unfinished task context for `defense_finished` or `body_available`;
+an explicit player stop discards that pending recovery.
 
 The manifest is stored in the Minecraft world's `data` directory, so the plan
 can be resumed after a sidecar or server restart. Demolition reuses exact saved
@@ -110,6 +130,11 @@ per block or an instant server-side `/fill`.
 Server chat polling runs independently from Codex turns. A direct stop phrase
 aborts the current SDK turn, cancels stale queued action chat, and calls
 `task_stop` on the companion body before acknowledging the player.
+
+At startup the sidecar verifies that the server exposes the complete workflow
+surface: `structure_plan`, `structure_status`, `structure_execute`,
+`structure_patch`, and `placement_feasibility`. A mismatched old mod therefore
+fails visibly instead of starting with a recovery path it cannot execute.
 
 ## Experience policy
 

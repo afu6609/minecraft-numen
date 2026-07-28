@@ -2,6 +2,7 @@ package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.agent.tool.NumenTool;
 import com.dwinovo.numen.core.task.BuildTaskRecord;
+import com.dwinovo.numen.core.task.MultiBlockPlacement;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -10,6 +11,7 @@ import net.minecraft.core.BlockPos;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -103,7 +105,7 @@ public final class StructurePlanTool implements NumenTool {
         reply.accept(result.toString());
     }
 
-    private static void validateBounds(
+    static void validateBounds(
             NumenPlayer self, List<BuildTaskRecord.Target> targets) {
         int minX = Integer.MAX_VALUE;
         int minY = Integer.MAX_VALUE;
@@ -112,30 +114,43 @@ public final class StructurePlanTool implements NumenTool {
         int maxY = Integer.MIN_VALUE;
         int maxZ = Integer.MIN_VALUE;
         BlockPos feet = self.blockPosition();
+        Map<BlockPos, BlockPos> footprintOwners = new LinkedHashMap<>();
         for (BuildTaskRecord.Target target : targets) {
-            BlockPos pos = target.pos();
-            if (pos.getY() < self.level().getMinBuildHeight()
-                    || pos.getY() >= self.level().getMaxBuildHeight()) {
-                throw new IllegalArgumentException(
-                        "blueprint cell outside build height at " + pos.toShortString());
+            for (MultiBlockPlacement.Cell cell : MultiBlockPlacement.footprint(
+                    target.pos(), target.desiredState())) {
+                BlockPos pos = cell.pos().immutable();
+                BlockPos previousOwner = footprintOwners.putIfAbsent(
+                        pos, target.pos().immutable());
+                if (previousOwner != null) {
+                    throw new IllegalArgumentException(
+                            "blueprint atomic footprints overlap at "
+                                    + pos.toShortString() + " (owned by "
+                                    + previousOwner.toShortString() + " and "
+                                    + target.pos().toShortString() + ")");
+                }
+                if (pos.getY() < self.level().getMinBuildHeight()
+                        || pos.getY() >= self.level().getMaxBuildHeight()) {
+                    throw new IllegalArgumentException(
+                            "blueprint cell outside build height at " + pos.toShortString());
+                }
+                if (!self.level().hasChunkAt(pos)) {
+                    throw new IllegalArgumentException(
+                            "every blueprint cell must be loaded while planning; move closer to "
+                                    + pos.toShortString());
+                }
+                if (Math.abs((long) pos.getX() - feet.getX()) > MAX_HORIZONTAL_DISTANCE
+                        || Math.abs((long) pos.getZ() - feet.getZ()) > MAX_HORIZONTAL_DISTANCE
+                        || Math.abs((long) pos.getY() - feet.getY()) > MAX_VERTICAL_DISTANCE) {
+                    throw new IllegalArgumentException(
+                            "blueprint cells must stay within 48 horizontal and 32 vertical blocks of me");
+                }
+                minX = Math.min(minX, pos.getX());
+                minY = Math.min(minY, pos.getY());
+                minZ = Math.min(minZ, pos.getZ());
+                maxX = Math.max(maxX, pos.getX());
+                maxY = Math.max(maxY, pos.getY());
+                maxZ = Math.max(maxZ, pos.getZ());
             }
-            if (!self.level().hasChunkAt(pos)) {
-                throw new IllegalArgumentException(
-                        "every blueprint cell must be loaded while planning; move closer to "
-                                + pos.toShortString());
-            }
-            if (Math.abs((long) pos.getX() - feet.getX()) > MAX_HORIZONTAL_DISTANCE
-                    || Math.abs((long) pos.getZ() - feet.getZ()) > MAX_HORIZONTAL_DISTANCE
-                    || Math.abs((long) pos.getY() - feet.getY()) > MAX_VERTICAL_DISTANCE) {
-                throw new IllegalArgumentException(
-                        "blueprint cells must stay within 48 horizontal and 32 vertical blocks of me");
-            }
-            minX = Math.min(minX, pos.getX());
-            minY = Math.min(minY, pos.getY());
-            minZ = Math.min(minZ, pos.getZ());
-            maxX = Math.max(maxX, pos.getX());
-            maxY = Math.max(maxY, pos.getY());
-            maxZ = Math.max(maxZ, pos.getZ());
         }
         if ((long) maxX - minX + 1 > MAX_AXIS
                 || (long) maxY - minY + 1 > MAX_AXIS

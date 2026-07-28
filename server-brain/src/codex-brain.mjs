@@ -19,8 +19,74 @@ For a construction, furnishing, repair, or demolition goal involving more than a
 5. Call structure_execute for one bounded build checkpoint. End the turn on its task_id. On task_finished, call structure_status before another batch; re-observe important geometry when something differs.
 6. Finish only after live status is complete and a final observation confirms the entrance, enclosed interior, lighting and furniture.
 
+Use structure_plan only for the initial complete blueprint or an intentional complete redesign. Once a workflow exists, never resend its whole blueprint for a local correction and never use raw build/break on its saved cells. Use structure_patch with the current expected_revision to upsert, move, remove, or clear only affected manifest cells, then call structure_status.
+
+Before retrying a failed state-sensitive placement, call placement_feasibility for the exact failed workflow cell. Treat target position + requested state + failure reason as the failure signature. A goto alone does not change that signature. For STATE_MISMATCH or NO_SUPPORT, do not retry the unchanged build: use the single feasibility recommended_patch when it preserves the player's intent, or design a small explicit structure_patch yourself. Apply one patch, re-run placement_feasibility at the new revision, and only then consider another structure_execute. For RECHECK_AFTER_CLEAR, the result is intentionally uncertain rather than a blueprint defect: let one bounded clearing/build checkpoint change the world, then preflight again. For OCCLUDED or OUT_OF_REACH, one move to a returned suggested stance and one retry are allowed. A second identical failure exhausts the unchanged-placement retry budget: patch the blueprint into a new requested state/location or report that this detail needs redesign.
+
 To remove a structure you made, resolve its saved workflow (latest only when the reference is unambiguous), check structure_status with operation=demolish, and use structure_execute demolition batches. This touches only saved coordinates that still match the blueprint, so do not replace it with material searches. If adopting an older structure that predates workflows, first observe an exact tight volume and register only that structure's occupied cells as a blueprint.
 </autonomous_action_loop>`;
+
+const FAILURE_TTL_MS = 10 * 60 * 1000;
+const MAX_FAILURE_SIGNATURES = 64;
+
+function placementFailureReason(message) {
+  if (/STATE_MISMATCH|different block state/i.test(message)) {
+    return "STATE_MISMATCH";
+  }
+  if (/NO_SUPPORT|nothing solid|no usable support/i.test(message)) {
+    return "NO_SUPPORT";
+  }
+  if (/OUT_OF_REACH|beyond .*reach/i.test(message)) {
+    return "OUT_OF_REACH";
+  }
+  if (
+    /OCCLUDED|NO_LINE_OF_SIGHT|line of sight|view .*blocked|under the crosshair/i.test(
+      message,
+    )
+  ) {
+    return "OCCLUDED";
+  }
+  if (/BLOCKED_BY_ENTITY|entity .*occup|creature .*standing/i.test(message)) {
+    return "BLOCKED_BY_ENTITY";
+  }
+  if (/BLOCKED_BY_SELF|body overlaps/i.test(message)) {
+    return "BLOCKED_BY_SELF";
+  }
+  if (/FOOTPRINT_BLOCKED|footprint .*occupied/i.test(message)) {
+    return "FOOTPRINT_BLOCKED";
+  }
+  return null;
+}
+
+function placementFailureSignature(event) {
+  if (
+    !["failed", "timeout", "timed_out"].includes(event?.status) ||
+    typeof event.message !== "string"
+  ) {
+    return null;
+  }
+  const reason = placementFailureReason(event.message);
+  if (reason == null) return null;
+  const target =
+    event.message.match(
+      /\btarget=(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\b/i,
+    ) ??
+    event.message.match(
+      /(?:can't place [^:]*? )?at\s+(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)/i,
+    ) ??
+    [];
+  const requested =
+    event.message.match(/\brequested=([^;]+);/i)?.[1]?.trim().toLowerCase() ??
+    "unknown";
+  const position =
+    target.length === 4 ? `${target[1]},${target[2]},${target[3]}` : "unknown";
+  return {
+    key: `${event.taskName ?? "unknown"}|${reason}|${position}|${requested}`,
+    reason,
+    position,
+    requested,
+  };
+}
 
 function eventPrompt(companion, event, decision, persona) {
   return `You are handling a new event inside a private Minecraft server.
@@ -43,11 +109,12 @@ If the route is reply, answer naturally and concisely through send_chat as ${com
 When the request depends on the speaker's condition or location, call get_player_status with Event.playerName; use look_around_player when the blocks around that human matter. Do not assume every speaker is the companion owner.`;
 }
 
-function taskEventPrompt(companion, event, persona) {
+function taskEventPrompt(companion, event, persona, recovery) {
   return `A background Minecraft action you previously started has now ended.
 
 Companion body: ${JSON.stringify(companion)}
 Task event: ${JSON.stringify(event)}
+Placement recovery budget: ${JSON.stringify(recovery)}
 
 Your in-world identity and behavior:
 <persona>
@@ -56,14 +123,17 @@ ${persona}
 
 ${AUTONOMOUS_ACTION_LOOP}
 
-This task event is authoritative. Reconstruct the player's original goal from this same thread. Re-perceive the live world before claiming success. If the original goal is complete, report it naturally with send_chat. If it is incomplete and a safe bounded next action is obvious, continue it using the Numen tools; do not repeat the same failed action without new evidence or a changed approach. If the task failed or timed out and recovery is not justified, explain the obstacle briefly. Never expose hidden reasoning or backend terms.`;
+This task event is authoritative. Reconstruct the player's original goal from this same thread. Re-perceive the live world before claiming success. If the original goal is complete, report it naturally with send_chat. If it is incomplete and a safe bounded next action is obvious, continue it using the Numen tools; do not repeat the same failed action without new evidence or a changed approach.
+
+For a failed build checkpoint, call structure_status for its workflow and placement_feasibility for the failed or remaining unmatched cells. For STATE_MISMATCH or NO_SUPPORT, goto alone is not a changed approach: apply a revision-checked structure_patch before another structure_execute. For FOOTPRINT_BLOCKED, inspect the exact footprint and either clear a verified obstruction or patch the conflicting cell. For BLOCKED_BY_ENTITY, re-observe and wait or lead the blocker away; do not redesign the blueprint merely because a creature is temporarily present. For BLOCKED_BY_SELF, OCCLUDED, or OUT_OF_REACH, at most one move to a returned suggested stance may precede one retry. If Placement recovery budget has retry_allowed=false, do not start another unchanged goto/build/structure_execute for that signature; patch its requested state/location or explain the redesign obstacle. If recovery is not justified, explain the obstacle briefly. Never expose hidden reasoning or backend terms.`;
 }
 
-function bodyEventPrompt(companion, events, persona) {
+function bodyEventPrompt(companion, events, interruptedTasks, persona) {
   return `Authoritative server-side body telemetry arrived while you are the persistent Minecraft player.
 
 Companion body: ${JSON.stringify(companion)}
 Body events, oldest first: ${JSON.stringify(events)}
+Interrupted task events that still need reconciliation: ${JSON.stringify(interruptedTasks)}
 
 Your in-world identity and behavior:
 <persona>
@@ -72,7 +142,7 @@ ${persona}
 
 ${AUTONOMOUS_ACTION_LOOP}
 
-These are trusted server facts, not player chat. Reconstruct the unfinished player goal from this same thread. First call get_self_status and task_status to re-ground against the live body. If a construction workflow is relevant, call structure_status and inspect important nearby geometry before deciding what changed.
+These are trusted server facts, not player chat. Reconstruct the unfinished player goal from this same thread. First call get_self_status and task_status to re-ground against the live body. If a construction workflow is relevant, call structure_status and inspect important nearby geometry before deciding what changed. Reconcile every interrupted task event above; for a placement failure use placement_feasibility and structure_patch under the same retry rules as a normal task event.
 
 Local reflexes already handled immediate danger. Do not duplicate a fight or blindly restart an action that is still running. If a task remains active, let it continue after verifying that its target is still sensible. If death dropped the task or displacement invalidated it, recover the original goal from its saved workflow and fresh observations, taking at most one safe bounded next action. Do not send chat for routine telemetry unless the player needs a useful warning, recovery update, or verified result. Never expose backend terms or hidden reasoning.`;
 }
@@ -87,6 +157,16 @@ function sentChat(turn) {
   );
 }
 
+function completedNumenTool(turn, tool) {
+  return turn.items.some(
+    (item) =>
+      item.type === "mcp_tool_call" &&
+      item.server === "numen" &&
+      item.tool === tool &&
+      item.status === "completed",
+  );
+}
+
 export class MomoBrain {
   constructor(startThread, companion, persona = "") {
     this.startThread = startThread;
@@ -96,10 +176,24 @@ export class MomoBrain {
     this.activeController = null;
     this.interruptEpoch = 0;
     this.pendingBodyEvents = [];
+    this.pendingTaskEvents = [];
+    this.failureSignatures = new Map();
+    this.activeTaskRecoveryEpoch = null;
+    this.taskRecoveryPermissionEpoch = null;
   }
 
-  interrupt() {
+  interrupt({ preserveTaskRecovery = false } = {}) {
+    const interruptedEpoch = this.interruptEpoch;
     this.interruptEpoch += 1;
+    if (
+      preserveTaskRecovery &&
+      this.activeTaskRecoveryEpoch === interruptedEpoch
+    ) {
+      this.taskRecoveryPermissionEpoch = interruptedEpoch;
+    } else if (!preserveTaskRecovery) {
+      this.taskRecoveryPermissionEpoch = null;
+      this.pendingTaskEvents = [];
+    }
     if (this.activeController == null) return false;
     this.activeController.abort();
     return true;
@@ -110,7 +204,9 @@ export class MomoBrain {
     const controller = new AbortController();
     this.activeController = controller;
     try {
-      return await this.thread.run(prompt, { signal: controller.signal });
+      const turn = await this.thread.run(prompt, { signal: controller.signal });
+      this.noteCompletedRepairs(turn);
+      return turn;
     } catch (error) {
       if (controller.signal.aborted) return null;
       throw error;
@@ -148,25 +244,99 @@ export class MomoBrain {
     if (event.status === "stopped") return;
     if (this.thread == null) this.thread = this.startThread();
     const epoch = this.interruptEpoch;
+    const recovery = this.noteTaskFailure(event);
 
-    let turn = await this.runTurn(
-      taskEventPrompt(this.companion, event, this.persona),
-      epoch,
-    );
-    if (turn == null) return { interrupted: true };
+    let turn;
+    this.activeTaskRecoveryEpoch = epoch;
+    try {
+      turn = await this.runTurn(
+        taskEventPrompt(this.companion, event, this.persona, recovery),
+        epoch,
+      );
+    } catch (error) {
+      this.queueTaskEvent(event, recovery);
+      throw error;
+    } finally {
+      if (this.activeTaskRecoveryEpoch === epoch) {
+        this.activeTaskRecoveryEpoch = null;
+      }
+    }
+    if (turn == null) {
+      if (this.takeTaskRecoveryPermission(epoch)) {
+        this.queueTaskEvent(event, recovery);
+      }
+      return { interrupted: true };
+    }
     if (!sentChat(turn)) {
       turn = await this.runTurn(
         `Task event ${event.id} still has no player-visible update. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, recovery update, or obstacle. Do not only describe what you would say.`,
         epoch,
       );
     }
-    if (turn == null) return { interrupted: true };
+    if (turn == null) {
+      this.takeTaskRecoveryPermission(epoch);
+      return { interrupted: true };
+    }
     if (!sentChat(turn)) {
       throw new Error(
         `agent handled task event ${event.id} without calling send_chat`,
       );
     }
     return { interrupted: false };
+  }
+
+  noteTaskFailure(event, now = Date.now()) {
+    for (const [key, entry] of this.failureSignatures) {
+      if (now - entry.lastSeen > FAILURE_TTL_MS) {
+        this.failureSignatures.delete(key);
+      }
+    }
+    const signature = placementFailureSignature(event);
+    if (signature == null) {
+      return {
+        placement_failure: false,
+        retry_allowed: true,
+      };
+    }
+    const previous = this.failureSignatures.get(signature.key);
+    const count = (previous?.count ?? 0) + 1;
+    this.failureSignatures.delete(signature.key);
+    this.failureSignatures.set(signature.key, { count, lastSeen: now });
+    while (this.failureSignatures.size > MAX_FAILURE_SIGNATURES) {
+      this.failureSignatures.delete(this.failureSignatures.keys().next().value);
+    }
+    return {
+      placement_failure: true,
+      reason: signature.reason,
+      position: signature.position,
+      requested_state: signature.requested,
+      identical_failures: count,
+      retry_allowed: count < 2,
+    };
+  }
+
+  queueTaskEvent(event, recovery) {
+    this.pendingTaskEvents = this.pendingTaskEvents.filter(
+      (entry) => entry.event?.id !== event?.id,
+    );
+    this.pendingTaskEvents.push({ event, recovery });
+    if (this.pendingTaskEvents.length > 8) {
+      this.pendingTaskEvents.splice(0, this.pendingTaskEvents.length - 8);
+    }
+  }
+
+  takeTaskRecoveryPermission(epoch) {
+    const preserve = this.taskRecoveryPermissionEpoch === epoch;
+    if (preserve) {
+      this.taskRecoveryPermissionEpoch = null;
+    }
+    return preserve;
+  }
+
+  noteCompletedRepairs(turn) {
+    if (completedNumenTool(turn, "structure_patch")) {
+      this.failureSignatures.clear();
+    }
   }
 
   noteBodyEvent(event) {
@@ -180,19 +350,27 @@ export class MomoBrain {
     this.noteBodyEvent(event);
     if (this.thread == null) this.thread = this.startThread();
     const events = this.pendingBodyEvents.splice(0);
+    const interruptedTasks = this.pendingTaskEvents.splice(0);
     const epoch = this.interruptEpoch;
     let turn;
     try {
       turn = await this.runTurn(
-        bodyEventPrompt(this.companion, events, this.persona),
+        bodyEventPrompt(
+          this.companion,
+          events,
+          interruptedTasks,
+          this.persona,
+        ),
         epoch,
       );
     } catch (error) {
       this.pendingBodyEvents.unshift(...events);
+      this.pendingTaskEvents.unshift(...interruptedTasks);
       throw error;
     }
     if (turn == null) {
       this.pendingBodyEvents.unshift(...events);
+      this.pendingTaskEvents.unshift(...interruptedTasks);
       return { interrupted: true };
     }
     return { interrupted: false };

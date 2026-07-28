@@ -38,7 +38,7 @@ function inboxPriority(event) {
   return event?.type === "task_finished" ? 1 : 0;
 }
 
-async function verifyMcp(client) {
+export async function verifyMcp(client) {
   await client.initialize();
   const tools = await client.listTools();
   const names = new Set(tools.map((tool) => tool.name));
@@ -50,6 +50,11 @@ async function verifyMcp(client) {
     "run_command",
     "task_stop",
     "follow_player",
+    "structure_plan",
+    "structure_status",
+    "structure_execute",
+    "structure_patch",
+    "placement_feasibility",
   ]) {
     if (!names.has(required)) {
       throw new Error(
@@ -82,7 +87,7 @@ export async function run({
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    brain.interrupt();
+    brain.interrupt({ preserveTaskRecovery: false });
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -134,7 +139,9 @@ export async function run({
             );
             if (controlRequest != null) {
               inbox.cancelPlayerChatsThrough(event.id);
-              const interruptedTurn = brain.interrupt();
+              const interruptedTurn = brain.interrupt({
+                preserveTaskRecovery: false,
+              });
               const result = await controlGateway.handle(event, controlRequest);
               log(result.ok ? "info" : "warn", "server control handled", {
                 eventId: event.id,
@@ -154,7 +161,9 @@ export async function run({
           }
           for (const event of bodyEvents) {
             if (event.type === "defense_started" || event.type === "death") {
-              const interruptedTurn = brain.interrupt();
+              const interruptedTurn = brain.interrupt({
+                preserveTaskRecovery: true,
+              });
               log(
                 event.type === "death" ? "warn" : "info",
                 "urgent body event interrupted stale reasoning",

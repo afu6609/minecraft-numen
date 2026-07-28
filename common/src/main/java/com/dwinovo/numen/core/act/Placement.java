@@ -118,10 +118,44 @@ public final class Placement {
     public static PlaceResolution resolveDetailed(NumenPlayer player, BlockPos placeAt,
                                                   boolean wouldSneak, Double aimY,
                                                   Predicate<BlockHitResult> hitVerifier) {
-        Level level = player.level();
         // 1.20.1:无交互距离属性,按生存/创造固定臂长。
         double reach = player.isCreative() ? 5.0 : 4.5;
         Vec3 eye = eye(player, wouldSneak);
+        return resolveDetailedFromEye(
+                player, placeAt, eye, player.getLookAngle(), reach, aimY, hitVerifier);
+    }
+
+    /**
+     * Read-only placement preview from a hypothetical eye position. The body is not
+     * teleported and no input or inventory state is changed; this runs the exact same
+     * support, reach and ray pipeline as a live placement resolution. The verifier is
+     * invoked with the temporary yaw/pitch that would look at each sampled hit, then the
+     * player's rotation is restored before this method returns.
+     */
+    public static PlaceResolution resolveDetailedFromEye(
+            NumenPlayer player,
+            BlockPos placeAt,
+            Vec3 eye,
+            Double aimY,
+            Predicate<BlockHitResult> hitVerifier) {
+        Vec3 towardTarget = Vec3.atCenterOf(placeAt).subtract(eye);
+        Vec3 look = towardTarget.lengthSqr() < 1.0e-6
+                ? player.getLookAngle()
+                : towardTarget.normalize();
+        double reach = player.isCreative() ? 5.0 : 4.5;
+        return resolveDetailedFromEye(
+                player, placeAt, eye, look, reach, aimY, hitVerifier);
+    }
+
+    private static PlaceResolution resolveDetailedFromEye(
+            NumenPlayer player,
+            BlockPos placeAt,
+            Vec3 eye,
+            Vec3 look,
+            double reach,
+            Double aimY,
+            Predicate<BlockHitResult> hitVerifier) {
+        Level level = player.level();
 
         // ---- 1. entity pre-check (no rays): vanilla refuses any placement whose block
         // would overlap a building-blocking entity, so every press is doomed until it
@@ -139,12 +173,7 @@ public final class Placement {
         }
 
         // ---- 2. support candidates: all six neighbours with a sturdy shared face.
-        List<Direction> supports = new ArrayList<>(6);
-        for (Direction dir : Direction.values()) {
-            if (supportCandidate(level, placeAt, dir)) {
-                supports.add(dir);
-            }
-        }
+        List<Direction> supports = supportDirections(level, placeAt);
         // A block already sitting in the cell is a click-replace candidate (stage 5).
         boolean clickableTarget = !level.getBlockState(placeAt).isAir();
         if (supports.isEmpty() && !clickableTarget) {
@@ -156,7 +185,6 @@ public final class Placement {
 
         // ---- 3./4. rank the visible faces, then raycast best-first under the budget.
         List<Direction> ranked = PlaceGeometry.rankVisible(eye, placeAt, supports);
-        Vec3 look = player.getLookAngle();
         double reachSqr = (reach + REACH_MARGIN) * (reach + REACH_MARGIN);
         int rays = 0;
         boolean triedAny = false;        // at least one ray was actually spent
@@ -233,6 +261,17 @@ public final class Placement {
                 "a support face exists at " + placeAt.toShortString() + " but my view of it is"
                         + " blocked from here — something solid sits between my eyes and the face",
                 stance, occluder[0]);
+    }
+
+    /** All neighbour directions accepted by the live resolver as placement supports. */
+    public static List<Direction> supportDirections(Level level, BlockPos placeAt) {
+        List<Direction> supports = new ArrayList<>(6);
+        for (Direction direction : Direction.values()) {
+            if (supportCandidate(level, placeAt, direction)) {
+                supports.add(direction);
+            }
+        }
+        return List.copyOf(supports);
     }
 
     private static PlaceResolution acceptedHit(NumenPlayer player, BlockHitResult hit,

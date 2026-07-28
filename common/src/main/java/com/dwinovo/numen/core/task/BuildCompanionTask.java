@@ -28,6 +28,7 @@ import it.unimi.dsi.fastutil.longs.LongSet;
 import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Inventory;
@@ -43,6 +44,7 @@ import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -74,9 +76,6 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private static final Direction[] PLACE_GOAL_FACES = {
             Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.DOWN
     };
-    private static final float[] PLACEMENT_YAWS = {0.0f, 90.0f, 180.0f, -90.0f};
-    private static final float[] PLACEMENT_PITCHES = {-75.0f, 0.0f, 75.0f};
-    private static final double[] PLACEMENT_FACE_SAMPLES = {0.25, 0.5, 0.75};
 
     private final Map<Long, BuildTaskRecord.Target> targetByPos = new LinkedHashMap<>();
     /** Vanilla creates these partner cells atomically (bed head / door upper half). */
@@ -448,43 +447,73 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     private LocalPlacement resolveLocalPlacement(BuildTaskRecord.Target target) {
         if (blockedByOtherEntity(target.pos(), target.desiredState())) {
-            rememberPlacementDiagnostic(target,
+            rememberPlacementDiagnostic(target, "BLOCKED_BY_ENTITY",
                     "another entity occupies the required placement footprint");
             return null;
         }
         if (!placementBlockSpaceAvailable(target.pos(), target.desiredState())) {
-            rememberPlacementDiagnostic(target,
+            rememberPlacementDiagnostic(target, "FOOTPRINT_BLOCKED",
                     "its multi-block footprint is occupied or lacks required floor support");
             return null;
         }
         if (!placementPlausible(target.pos(), target.desiredState())) {
-            rememberPlacementDiagnostic(target,
+            rememberPlacementDiagnostic(target, "BLOCKED_BY_SELF",
                     "my current body overlaps its placement footprint; I need to move clear of every target cell");
             return null;
         }
         PlaceResolution resolution = Placement.resolveDetailed(player, target.pos(), true, aimY(target),
                 hit -> matchingSlotForHit(target, hit, null, null, true) >= 0);
         if (!resolution.ok()) {
-            rememberPlacementDiagnostic(target, resolution.message());
+            rememberPlacementDiagnostic(target, resolution.reason().name(), resolution.message());
             return null;
         }
         int slot = matchingSlotForHit(target, resolution.hit(), resolution.yaw(), resolution.pitch(), true);
         if (slot < 0) {
-            rememberPlacementDiagnostic(target,
+            rememberPlacementDiagnostic(target, "STATE_MISMATCH",
                     "a reachable support face exists, but using it cannot create the requested block state");
             return null;
         }
         if (!nextTickCanReach(resolution)) {
-            rememberPlacementDiagnostic(target,
+            rememberPlacementDiagnostic(target, "NO_LINE_OF_SIGHT",
                     "the selected support face cannot be kept under the crosshair while I turn toward it");
             return null;
         }
         return new LocalPlacement(target, resolution, slot);
     }
 
-    private void rememberPlacementDiagnostic(BuildTaskRecord.Target target, String detail) {
-        lastPlacementDiagnostic = "can't place " + target.label() + " at " + target.shortPos()
-                + ": " + detail;
+    private void rememberPlacementDiagnostic(
+            BuildTaskRecord.Target target, String reason, String detail) {
+        lastPlacementDiagnostic = reason + " target="
+                + target.pos().getX() + ","
+                + target.pos().getY() + ","
+                + target.pos().getZ()
+                + " requested=" + stateKey(target.desiredState())
+                + "; message=" + detail;
+    }
+
+    private static String stateKey(BlockState state) {
+        StringBuilder key = new StringBuilder(
+                BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+        if (!state.getProperties().isEmpty()) {
+            key.append('[');
+            boolean first = true;
+            for (Property<?> property : state.getProperties()) {
+                if (!first) {
+                    key.append(',');
+                }
+                first = false;
+                key.append(property.getName())
+                        .append('=')
+                        .append(propertyValue(state, property));
+            }
+            key.append(']');
+        }
+        return key.toString();
+    }
+
+    private static <T extends Comparable<T>> String propertyValue(
+            BlockState state, Property<T> property) {
+        return property.getName(state.getValue(property));
     }
     private boolean canInterruptPath() {
         return player.onGround() && (nav == null || nav.isSafeToCancel());
@@ -958,39 +987,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     }
 
     private boolean stackCanCreateDesiredState(BuildTaskRecord.Target target, ItemStack stack) {
-        float oldYaw = player.getYRot();
-        float oldPitch = player.getXRot();
-        try {
-            for (float yaw : PLACEMENT_YAWS) {
-                for (float pitch : PLACEMENT_PITCHES) {
-                    player.setYRot(yaw);
-                    player.setXRot(pitch);
-                    for (Direction support : Direction.values()) {
-                        for (double sample : PLACEMENT_FACE_SAMPLES) {
-                            BlockHitResult hit = syntheticPlacementHit(target.pos(), support, sample);
-                            BlockState placed = predictedState(stack, hit, null, null);
-                            if (placed != null && target.acceptsPlacedState(placed)) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            return false;
-        } finally {
-            player.setYRot(oldYaw);
-            player.setXRot(oldPitch);
-        }
-    }
-    private BlockHitResult syntheticPlacementHit(BlockPos placeAt, Direction support, double sample) {
-        BlockPos against = placeAt.relative(support);
-        double x = (placeAt.getX() + against.getX() + 1.0) * 0.5;
-        double y = (placeAt.getY() + against.getY() + 1.0) * 0.5;
-        double z = (placeAt.getZ() + against.getZ() + 1.0) * 0.5;
-        if (support.getAxis().isHorizontal()) {
-            y = placeAt.getY() + sample;
-        }
-        return new BlockHitResult(new Vec3(x, y, z), support.getOpposite(), against, false);
+        return PlacementStatePredictor.canCreateDesiredState(player, target, stack);
     }
 
     private int matchingSlotForHit(BuildTaskRecord.Target target, BlockHitResult hit,
@@ -1013,26 +1010,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     }
 
     private BlockState predictedState(ItemStack stack, BlockHitResult hit, Float yaw, Float pitch) {
-        if (!(stack.getItem() instanceof BlockItem blockItem)) {
-            return null;
-        }
-        float oldYaw = player.getYRot();
-        float oldPitch = player.getXRot();
-        try {
-            if (yaw != null && pitch != null) {
-                player.setYRot(yaw);
-                player.setXRot(pitch);
-            }
-            BlockPlaceContext context = new BlockPlaceContext(new UseOnContext(
-                    player.level(), player, InteractionHand.MAIN_HAND, stack, hit) {});
-            BlockState state = blockItem.getBlock().getStateForPlacement(context);
-            return state != null && context.canPlace() ? state : null;
-        } catch (RuntimeException e) {
-            return null;
-        } finally {
-            player.setYRot(oldYaw);
-            player.setXRot(oldPitch);
-        }
+        return PlacementStatePredictor.predict(player, stack, hit, yaw, pitch);
     }
 
     private int inventoryScanLimit(boolean wholeInventory) {
@@ -1041,9 +1019,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                 : Math.min(9, player.getInventory().items.size());
     }
     private Double aimY(BuildTaskRecord.Target target) {
-        return target.topHalf() == null
-                ? null
-                : target.pos().getY() + (target.topHalf() ? 0.72 : 0.28);
+        return PlacementStatePredictor.aimY(target);
     }
 
     private boolean lowerBlocked(BuildTaskRecord.Target target) {

@@ -144,6 +144,8 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.BuildTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.StructurePlanTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.StructureStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.StructurePatchTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.PlacementFeasibilityTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.StructureExecuteTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.BreakBlockTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InteractAtTool());

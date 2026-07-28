@@ -29,10 +29,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Small world-local store for model-authored structure blueprints.
@@ -69,16 +73,15 @@ final class StructureWorkflowStore {
                     "structure workflow store is full; keep or remove old manifests before creating another");
         }
 
-        Map<Long, StateSpec> originalByPos = new LinkedHashMap<>();
+        Map<BlockPos, StateSpec> originalByPos = new LinkedHashMap<>();
         long createdAt = System.currentTimeMillis();
         String id = newId();
         if (previous != null) {
             id = previous.id;
             createdAt = previous.createdAt;
             for (Cell cell : previous.cells) {
-                originalByPos.put(cell.pos().asLong(), cell.before);
+                originalByPos.put(cell.pos().immutable(), cell.before);
             }
-            data.workflows.remove(previous);
         }
 
         Workflow workflow = new Workflow();
@@ -90,17 +93,49 @@ final class StructureWorkflowStore {
         workflow.allowReplace = allowReplace;
         workflow.createdAt = createdAt;
         workflow.updatedAt = System.currentTimeMillis();
+        workflow.revision = previous == null ? 1 : nextRevision(previous.revision);
         workflow.lastOperation = "plan";
         workflow.cells = new ArrayList<>(targets.size());
         for (BuildTaskRecord.Target target : targets) {
-            StateSpec before = originalByPos.get(target.pos().asLong());
+            StateSpec before = originalByPos.get(target.pos());
             if (before == null) {
                 before = StateSpec.from(self.level().getBlockState(target.pos()));
             }
             workflow.cells.add(Cell.from(target, before));
         }
-        data.workflows.add(workflow);
-        save(server, data);
+
+        StoreData replacement = replacing(data, previous, workflow);
+        save(server, replacement);
+        CACHE.put(server, replacement);
+        return workflow;
+    }
+
+    static synchronized Workflow patch(
+            NumenPlayer self,
+            String requestedId,
+            long expectedRevision,
+            List<BuildTaskRecord.Target> upserts,
+            List<BlockPos> removals) {
+        MinecraftServer server = requireServer(self);
+        StoreData data = data(server);
+        Workflow previous = findOwned(
+                data, self.getUUID().toString(), requireExactId(requestedId));
+        if (previous == null) {
+            throw new IllegalArgumentException(
+                    "unknown structure workflow " + requestedId + " for this companion");
+        }
+
+        Workflow workflow = patchedCopy(
+                previous,
+                expectedRevision,
+                upserts,
+                removals,
+                pos -> self.level().getBlockState(pos),
+                targets -> StructurePlanTool.validateBounds(self, targets));
+
+        StoreData replacement = replacing(data, previous, workflow);
+        save(server, replacement);
+        CACHE.put(server, replacement);
         return workflow;
     }
 
@@ -128,6 +163,197 @@ final class StructureWorkflowStore {
         workflow.updatedAt = System.currentTimeMillis();
         workflow.lastOperation = operation;
         save(server, data(server));
+    }
+
+    /**
+     * Build a fully validated replacement without mutating the saved workflow.
+     *
+     * <p>Package visibility keeps patch semantics directly unit-testable without
+     * requiring a filesystem-backed Minecraft server.</p>
+     */
+    static Workflow patchedCopy(
+            Workflow previous,
+            long expectedRevision,
+            List<BuildTaskRecord.Target> upserts,
+            List<BlockPos> removals,
+            Function<BlockPos, BlockState> currentState) {
+        return patchedCopy(
+                previous,
+                expectedRevision,
+                upserts,
+                removals,
+                currentState,
+                ignored -> {});
+    }
+
+    /**
+     * Variant used by the live store to validate the complete patched manifest
+     * before any newly-added coordinate is read from the world. This prevents a
+     * rejected far-away patch from synchronously loading or probing that chunk.
+     */
+    static Workflow patchedCopy(
+            Workflow previous,
+            long expectedRevision,
+            List<BuildTaskRecord.Target> upserts,
+            List<BlockPos> removals,
+            Function<BlockPos, BlockState> currentState,
+            Consumer<List<BuildTaskRecord.Target>> finalManifestValidator) {
+        if (previous == null) {
+            throw new IllegalArgumentException("workflow must not be null");
+        }
+        if (currentState == null || finalManifestValidator == null) {
+            throw new IllegalArgumentException(
+                    "patch state reader and manifest validator must not be null");
+        }
+        long revision = normalizedRevision(previous.revision);
+        if (expectedRevision != revision) {
+            throw new IllegalArgumentException(
+                    "structure workflow revision changed: expected "
+                            + expectedRevision + " but current revision is " + revision
+                            + "; call structure_status and rebase the patch");
+        }
+        if (upserts == null) {
+            upserts = List.of();
+        }
+        if (removals == null) {
+            removals = List.of();
+        }
+        if (upserts.isEmpty() && removals.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "structure patch must upsert or remove at least one cell");
+        }
+        if ((long) upserts.size() + removals.size() > StructurePlanTool.MAX_CELLS) {
+            throw new IllegalArgumentException(
+                    "structure patch accepts at most "
+                            + StructurePlanTool.MAX_CELLS + " operations");
+        }
+
+        Map<BlockPos, BuildTaskRecord.Target> upsertByPos = new LinkedHashMap<>();
+        for (BuildTaskRecord.Target target : upserts) {
+            if (target == null) {
+                throw new IllegalArgumentException("upsert cells must not be null");
+            }
+            BlockPos key = target.pos().immutable();
+            if (upsertByPos.putIfAbsent(key, target) != null) {
+                throw new IllegalArgumentException(
+                        "duplicate upsert cell " + target.pos().toShortString());
+            }
+        }
+        Map<BlockPos, BlockPos> removeByPos = new LinkedHashMap<>();
+        for (BlockPos pos : removals) {
+            if (pos == null) {
+                throw new IllegalArgumentException("remove positions must not be null");
+            }
+            BlockPos key = pos.immutable();
+            if (removeByPos.putIfAbsent(key, key) != null) {
+                throw new IllegalArgumentException(
+                        "duplicate remove position " + pos.toShortString());
+            }
+            if (upsertByPos.containsKey(key)) {
+                throw new IllegalArgumentException(
+                        "one patch cannot both remove and upsert "
+                                + pos.toShortString());
+            }
+        }
+
+        Map<BlockPos, Cell> previousByPos = new LinkedHashMap<>();
+        for (Cell cell : previous.cells) {
+            BlockPos key = cell.pos().immutable();
+            if (previousByPos.putIfAbsent(key, cell) != null) {
+                throw new IllegalStateException(
+                        "saved structure workflow contains duplicate cell "
+                                + key.toShortString());
+            }
+        }
+        for (BlockPos pos : removeByPos.values()) {
+            if (!previousByPos.containsKey(pos)) {
+                throw new IllegalArgumentException(
+                        "cannot remove unsaved structure cell " + pos.toShortString());
+            }
+        }
+        for (Map.Entry<BlockPos, BuildTaskRecord.Target> entry : upsertByPos.entrySet()) {
+            Cell saved = previousByPos.get(entry.getKey());
+            if (saved == null) {
+                continue;
+            }
+            BuildTaskRecord.Target target = entry.getValue();
+            String itemId = BuiltInRegistries.ITEM.getKey(target.item()).toString();
+            if (saved.desired.toState().equals(target.desiredState())
+                    && saved.itemId.equals(itemId)) {
+                throw new IllegalArgumentException(
+                        "upsert does not change saved structure cell "
+                                + target.pos().toShortString());
+            }
+        }
+
+        List<BuildTaskRecord.Target> finalTargets = new ArrayList<>(
+                previous.cells.size() - removeByPos.size() + upsertByPos.size());
+        Set<BlockPos> appliedUpserts = new LinkedHashSet<>();
+        for (Cell cell : previous.cells) {
+            BlockPos key = cell.pos().immutable();
+            if (removeByPos.containsKey(key)) {
+                continue;
+            }
+            BuildTaskRecord.Target replacement = upsertByPos.get(key);
+            if (replacement == null) {
+                finalTargets.add(target(cell));
+            } else {
+                finalTargets.add(replacement);
+                appliedUpserts.add(key);
+            }
+        }
+        for (Map.Entry<BlockPos, BuildTaskRecord.Target> entry : upsertByPos.entrySet()) {
+            if (appliedUpserts.contains(entry.getKey())) {
+                continue;
+            }
+            finalTargets.add(entry.getValue());
+        }
+
+        if (finalTargets.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "structure patch cannot remove every saved cell");
+        }
+        if (finalTargets.size() > StructurePlanTool.MAX_CELLS) {
+            throw new IllegalArgumentException(
+                    "patched blueprint accepts at most "
+                            + StructurePlanTool.MAX_CELLS + " cells");
+        }
+        finalManifestValidator.accept(List.copyOf(finalTargets));
+
+        Workflow workflow = copyMetadata(previous);
+        workflow.updatedAt = System.currentTimeMillis();
+        workflow.revision = nextRevision(revision);
+        workflow.lastOperation = "patch";
+        workflow.cells = new ArrayList<>(finalTargets.size());
+
+        appliedUpserts.clear();
+        for (Cell cell : previous.cells) {
+            BlockPos key = cell.pos().immutable();
+            if (removeByPos.containsKey(key)) {
+                continue;
+            }
+            BuildTaskRecord.Target replacement = upsertByPos.get(key);
+            if (replacement == null) {
+                workflow.cells.add(copyCell(cell));
+            } else {
+                workflow.cells.add(Cell.from(replacement, copyState(cell.before)));
+                appliedUpserts.add(key);
+            }
+        }
+        for (Map.Entry<BlockPos, BuildTaskRecord.Target> entry : upsertByPos.entrySet()) {
+            if (appliedUpserts.contains(entry.getKey())) {
+                continue;
+            }
+            BuildTaskRecord.Target target = entry.getValue();
+            BlockState before = currentState.apply(target.pos());
+            if (before == null) {
+                throw new IllegalStateException(
+                        "could not read original block state at "
+                                + target.pos().toShortString());
+            }
+            workflow.cells.add(Cell.from(target, StateSpec.from(before)));
+        }
+        return workflow;
     }
 
     static BuildTaskRecord.Target target(Cell cell) {
@@ -164,6 +390,77 @@ final class StructureWorkflowStore {
             }
         }
         return null;
+    }
+
+    private static StoreData replacing(
+            StoreData data, Workflow previous, Workflow workflow) {
+        StoreData replacement = new StoreData();
+        replacement.version = data.version;
+        replacement.workflows = new ArrayList<>(data.workflows);
+        if (previous != null) {
+            replacement.workflows.remove(previous);
+        }
+        replacement.workflows.add(workflow);
+        return replacement;
+    }
+
+    private static String requireExactId(String requestedId) {
+        if (requestedId == null || requestedId.isBlank()
+                || requestedId.trim().equalsIgnoreCase("latest")) {
+            throw new IllegalArgumentException(
+                    "structure_patch requires the exact workflow_id returned by structure_plan");
+        }
+        return requestedId.trim();
+    }
+
+    private static long normalizedRevision(long revision) {
+        return Math.max(1, revision);
+    }
+
+    private static long nextRevision(long revision) {
+        long normalized = normalizedRevision(revision);
+        if (normalized == Long.MAX_VALUE) {
+            throw new IllegalStateException("structure workflow revision exhausted");
+        }
+        return normalized + 1;
+    }
+
+    private static Workflow copyMetadata(Workflow source) {
+        Workflow copy = new Workflow();
+        copy.id = source.id;
+        copy.ownerUuid = source.ownerUuid;
+        copy.ownerName = source.ownerName;
+        copy.name = source.name;
+        copy.goal = source.goal;
+        copy.allowReplace = source.allowReplace;
+        copy.createdAt = source.createdAt;
+        copy.updatedAt = source.updatedAt;
+        copy.revision = normalizedRevision(source.revision);
+        copy.lastOperation = source.lastOperation;
+        return copy;
+    }
+
+    private static Cell copyCell(Cell source) {
+        Cell copy = new Cell();
+        copy.x = source.x;
+        copy.y = source.y;
+        copy.z = source.z;
+        copy.itemId = source.itemId;
+        copy.desired = copyState(source.desired);
+        copy.before = copyState(source.before);
+        return copy;
+    }
+
+    private static StateSpec copyState(StateSpec source) {
+        if (source == null) {
+            return null;
+        }
+        StateSpec copy = new StateSpec();
+        copy.blockId = source.blockId;
+        copy.properties = source.properties == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(source.properties);
+        return copy;
     }
 
     private static String newId() {
@@ -218,6 +515,11 @@ final class StructureWorkflowStore {
         if (loaded.workflows == null) {
             loaded.workflows = new ArrayList<>();
         }
+        for (Workflow workflow : loaded.workflows) {
+            if (workflow.revision < 1) {
+                workflow.revision = 1;
+            }
+        }
         CACHE.put(server, loaded);
         return loaded;
     }
@@ -255,6 +557,7 @@ final class StructureWorkflowStore {
         boolean allowReplace;
         long createdAt;
         long updatedAt;
+        long revision = 1;
         String lastOperation;
         List<Cell> cells = new ArrayList<>();
     }
