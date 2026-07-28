@@ -122,6 +122,42 @@ public final class PlacementFeasibilityTool implements NumenTool {
             RepairProposal repair,
             boolean repairSearchPerformed) {}
 
+    /**
+     * Structured, renderer-free verdict shared with the live build task.
+     * Keeping this on the same scanner as the MCP tool prevents the preflight
+     * from promising a stance that execution would classify differently.
+     */
+    public record RuntimeAssessment(
+            boolean feasible,
+            boolean alreadyMatches,
+            String reason,
+            String message,
+            List<BlockPos> suggestedStances) {
+
+        public RuntimeAssessment {
+            suggestedStances = suggestedStances == null
+                    ? List.of()
+                    : List.copyOf(suggestedStances);
+        }
+
+        public boolean deterministicFailure() {
+            return switch (reason) {
+                case "STATE_MISMATCH",
+                        "NO_SUPPORT",
+                        "SURVIVAL_FAILED",
+                        "FOOTPRINT_BLOCKED",
+                        "NO_STANDABLE_STANCE",
+                        "NO_FEASIBLE_PLACEMENT",
+                        "NOT_A_PLACEABLE_TARGET" -> true;
+                default -> false;
+            };
+        }
+
+        public boolean transientObstacle() {
+            return reason.equals("BLOCKED_BY_ENTITY");
+        }
+    }
+
     @Override
     public String name() {
         return "placement_feasibility";
@@ -272,6 +308,90 @@ public final class PlacementFeasibilityTool implements NumenTool {
                     results.size() - feasible > 1);
         }
         reply.accept(root.toString());
+    }
+
+    /**
+     * Run the exact bounded stance/state scan used by the MCP renderer without
+     * allocating or parsing a JSON result. The build task calls this only after
+     * navigation has arrived without exposing local work, not on every tick.
+     */
+    public static RuntimeAssessment assessRuntime(
+            NumenPlayer self,
+            BuildTaskRecord.Target target,
+            List<BuildTaskRecord.Target> allTargets,
+            boolean allowReplace) {
+        List<BuildTaskRecord.Target> manifest =
+                allTargets == null || allTargets.isEmpty()
+                        ? List.of(target)
+                        : List.copyOf(allTargets);
+        Source source = new Source(
+                List.of(target),
+                reservedCellCounts(manifest),
+                allowReplace,
+                null,
+                null,
+                bounds(manifest),
+                1,
+                true,
+                false);
+        Level level = self.level();
+
+        if (!footprintNeighborhoodLoaded(
+                level, target.pos(), target.desiredState())) {
+            return new RuntimeAssessment(
+                    false, false, "UNLOADED",
+                    "target chunk or a required neighbouring cell is not loaded",
+                    List.of());
+        }
+        if (MultiBlockPlacement.matches(level, target)) {
+            return new RuntimeAssessment(
+                    true, true, "ALREADY_MATCHES",
+                    "the requested state and every atomic partner cell already match",
+                    List.of());
+        }
+        if (target.block() == Blocks.AIR) {
+            return new RuntimeAssessment(
+                    false, false, "NOT_A_PLACEABLE_TARGET",
+                    "air is a clearing target; placement feasibility does not apply",
+                    List.of());
+        }
+
+        Set<BlockPos> reservedOther =
+                reservedByOtherTargets(source, target);
+        CellFacts facts = cellFacts(
+                self, target.pos(), target.desiredState(),
+                reservedOther, allowReplace);
+        boolean requiresClear = requiresClearBeforePlacement(
+                level, target, allowReplace);
+        if (requiresClear) {
+            return new RuntimeAssessment(
+                    false, false, "RECHECK_AFTER_CLEAR",
+                    message("RECHECK_AFTER_CLEAR", target),
+                    List.of());
+        }
+
+        List<Direction> supports =
+                Placement.supportDirections(level, target.pos());
+        Scan scan = scanAt(
+                self, target, target.pos(), reservedOther,
+                allowReplace, false, MAX_STANCES_PER_CELL);
+        boolean exact = !scan.exactStances().isEmpty()
+                && facts.survivalOk()
+                && facts.spaceAvailable()
+                && facts.entityClear();
+        String reason = classify(
+                exact, facts, supports, scan, false);
+        List<BlockPos> suggested = !scan.exactStances().isEmpty()
+                ? scan.exactStances()
+                : firstOptionStances(scan.options());
+        return new RuntimeAssessment(
+                exact,
+                false,
+                reason,
+                message(reason, target),
+                suggested.stream()
+                        .limit(MAX_RETURNED_STANCES)
+                        .toList());
     }
 
     private static Source resolveSource(

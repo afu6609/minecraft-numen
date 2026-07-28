@@ -17,6 +17,7 @@ import com.dwinovo.numen.core.pathing.moves.movements.BuildPlacementRegistry;
 import com.dwinovo.numen.core.pathing.exec.PlayerNav;
 import com.dwinovo.numen.core.pathing.settings.NavSettings;
 import com.dwinovo.numen.core.pathing.util.BlockHelper;
+import com.dwinovo.numen.core.tools.PlacementFeasibilityTool;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import com.dwinovo.numen.core.task.base.Precondition;
 import com.dwinovo.numen.entity.NumenPlayer;
@@ -68,6 +69,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private static final double WALK_SPEED = 1.0;
     private static final int MAX_NO_SHOT_TICKS = 20;
     private static final int MAX_EMPTY_ARRIVALS = 6;
+    private static final int MAX_TRANSIENT_ARRIVALS = 10;
     private static final int POST_BREAK_PLACE_DELAY_TICKS = 5;
     private static final int LOCAL_ACTION_RADIUS = 5;
     private static final double DISTANCE_TRIM_SQR = 200.0;
@@ -97,7 +99,13 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private int stallTicks;
     private int highWaterCompleted;
     private String note = "done";
-    private String lastPlacementDiagnostic;
+    private PlacementDiagnostic lastPlacementDiagnostic;
+    /** One exact stance supplied by the shared preflight, attempted at most once per unchanged world. */
+    private String placementRecoveryKey;
+    private BlockPos placementRecoveryTarget;
+    private BlockPos placementRecoveryStance;
+    private String transientFailureSignature;
+    private int transientFailureObservations;
     private BlockPos suspendedAt;
     private net.minecraft.resources.ResourceKey<Level> suspendedDimension;
 
@@ -152,6 +160,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         observedCompleted = new LongOpenHashSet();
         stallTicks = 0;
         lastPlacementDiagnostic = null;
+        clearPlacementRecovery();
         registerProvider();
         updateCompleted();
         highWaterCompleted = r.completed();
@@ -178,6 +187,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             highWaterCompleted = r.completed();
             stallTicks = 0;
             lastPlacementDiagnostic = null;
+            clearPlacementRecovery();
         } else if (++stallTicks >= STALL_LIMIT_TICKS) {
             fail("stalled: no build progress for " + (STALL_LIMIT_TICKS / 20) + "s ("
                     + note + "); completed " + r.completed() + "/" + r.targets.size(),
@@ -236,15 +246,14 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                 stopNav();
                 boolean hasLocalWork = hasLocalWorkWindow();
                 if (!hasLocalWork) {
-                    if (++emptyArrivalTicks >= MAX_EMPTY_ARRIVALS) {
-                        note = lastPlacementDiagnostic == null
-                                ? "waiting for a usable build angle"
-                                : lastPlacementDiagnostic;
-                    } else {
-                        note = lastPlacementDiagnostic == null
-                                ? "rechecking nearby build angles"
-                                : lastPlacementDiagnostic;
+                    emptyArrivalTicks++;
+                    if (emptyArrivalTicks >= MAX_EMPTY_ARRIVALS
+                            && lastPlacementDiagnostic != null) {
+                        yield resolveEmptyArrival();
                     }
+                    note = lastPlacementDiagnostic == null
+                            ? "rechecking nearby build angles"
+                            : lastPlacementDiagnostic.render();
                     yield TaskState.RUNNING;
                 } else {
                     emptyArrivalTicks = 0;
@@ -259,7 +268,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                         + (reason == null || reason.isBlank() ? "" : ": " + reason);
                 note = lastPlacementDiagnostic == null
                         ? navFailure
-                        : lastPlacementDiagnostic + "; " + navFailure;
+                        : lastPlacementDiagnostic.render() + "; " + navFailure;
                 yield TaskState.RUNNING;
             }
         };
@@ -345,6 +354,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         BuildTaskRecord.Target target = placement.target();
         if (targetMatches(player.level(), target)) {
             lastPlacementDiagnostic = null;
+            clearPlacementRecovery();
             markObserved(target, true);
             return TaskState.RUNNING;
         }
@@ -371,6 +381,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             r.placedOne();
             noSupport.clear();
             lastPlacementDiagnostic = null;
+            clearPlacementRecovery();
             markObserved(target, true);
         } else {
             note = "waiting for the placed block to appear";
@@ -473,22 +484,170 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                     "a reachable support face exists, but using it cannot create the requested block state");
             return null;
         }
-        if (!nextTickCanReach(resolution)) {
-            rememberPlacementDiagnostic(target, "NO_LINE_OF_SIGHT",
-                    "the selected support face cannot be kept under the crosshair while I turn toward it");
-            return null;
-        }
         return new LocalPlacement(target, resolution, slot);
     }
 
     private void rememberPlacementDiagnostic(
             BuildTaskRecord.Target target, String reason, String detail) {
-        lastPlacementDiagnostic = reason + " target="
+        lastPlacementDiagnostic =
+                new PlacementDiagnostic(target, reason, detail);
+    }
+
+    private TaskState resolveEmptyArrival() {
+        PlacementDiagnostic diagnostic = lastPlacementDiagnostic;
+        BuildTaskRecord.Target target = diagnostic.target();
+        if (targetMatches(player.level(), target)) {
+            markObserved(target, true);
+            clearPlacementRecovery();
+            emptyArrivalTicks = 0;
+            return TaskState.RUNNING;
+        }
+
+        PlacementFeasibilityTool.RuntimeAssessment assessment =
+                PlacementFeasibilityTool.assessRuntime(
+                        player, target, r.targets, r.replaceExisting);
+        String failure = assessment.reason() + " target="
                 + target.pos().getX() + ","
                 + target.pos().getY() + ","
                 + target.pos().getZ()
                 + " requested=" + stateKey(target.desiredState())
-                + "; message=" + detail;
+                + "; message=" + assessment.message();
+        note = failure;
+
+        if (assessment.feasible()
+                && !assessment.suggestedStances().isEmpty()) {
+            String key = placementRecoveryKey(target);
+            if (!key.equals(placementRecoveryKey)) {
+                placementRecoveryKey = key;
+                placementRecoveryTarget = target.pos().immutable();
+                placementRecoveryStance =
+                        chooseRecoveryStance(assessment.suggestedStances());
+                transientFailureSignature = null;
+                transientFailureObservations = 0;
+                emptyArrivalTicks = 0;
+                note = "moving once to verified placement stance "
+                        + placementRecoveryStance.toShortString()
+                        + " for " + target.shortPos();
+                return TaskState.RUNNING;
+            }
+            if (placementRecoveryStance != null
+                    && !playerFeet().equals(placementRecoveryStance)) {
+                emptyArrivalTicks = 0;
+                note = "continuing to verified placement stance "
+                        + placementRecoveryStance.toShortString();
+                return TaskState.RUNNING;
+            }
+
+            String divergence = diagnostic.render()
+                    + "; shared preflight predicted this exact stance, but live placement"
+                    + " still rejected it after the single allowed reposition";
+            fail(divergence, failureTypeFor(diagnostic.reason()));
+            return TaskState.FAILED;
+        }
+
+        if (assessment.transientObstacle()) {
+            if (failure.equals(transientFailureSignature)) {
+                transientFailureObservations++;
+            } else {
+                transientFailureSignature = failure;
+                transientFailureObservations = 1;
+            }
+            if (transientFailureObservations < MAX_TRANSIENT_ARRIVALS) {
+                note = failure + "; waiting briefly for the entity to move";
+                return TaskState.RUNNING;
+            }
+            fail(failure, FailureType.ENTITY_BLOCKED);
+            return TaskState.FAILED;
+        }
+
+        if (assessment.deterministicFailure()
+                || assessment.reason().equals("OCCLUDED")
+                || assessment.reason().equals("OUT_OF_REACH")) {
+            fail(failure, failureTypeFor(assessment.reason()));
+            return TaskState.FAILED;
+        }
+
+        // UNLOADED and RECHECK_AFTER_CLEAR require an actual world transition;
+        // retain the 30-second fuse as their last-resort guard.
+        return TaskState.RUNNING;
+    }
+
+    private BlockPos chooseRecoveryStance(List<BlockPos> suggestions) {
+        BlockPos feet = playerFeet();
+        return suggestions.stream()
+                .filter(pos -> !pos.equals(feet))
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> pos.distSqr(feet))
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getY)
+                        .thenComparingInt(BlockPos::getZ))
+                .orElse(suggestions.get(0))
+                .immutable();
+    }
+
+    private String placementRecoveryKey(BuildTaskRecord.Target target) {
+        long fingerprint = stateKey(target.desiredState()).hashCode();
+        for (PlacementCell cell : placementFootprint(
+                target.pos(), target.desiredState())) {
+            fingerprint = 31L * fingerprint + cell.pos().hashCode();
+            fingerprint = 31L * fingerprint
+                    + player.level().getBlockState(cell.pos()).hashCode();
+            for (Direction direction : Direction.values()) {
+                BlockPos neighbour = cell.pos().relative(direction);
+                fingerprint = 31L * fingerprint + neighbour.hashCode();
+                fingerprint = 31L * fingerprint
+                        + player.level().getBlockState(neighbour).hashCode();
+            }
+        }
+        return target.pos().toShortString()
+                + "|" + stateKey(target.desiredState())
+                + "|" + fingerprint;
+    }
+
+    private NavGoal recoveryPlacementGoal(
+            List<BuildTaskRecord.Target> placeable) {
+        if (placementRecoveryTarget == null
+                || placementRecoveryStance == null) {
+            return null;
+        }
+        boolean stillPlaceable = placeable.stream()
+                .anyMatch(target ->
+                        target.pos().equals(placementRecoveryTarget));
+        if (!stillPlaceable) {
+            clearPlacementRecovery();
+            return null;
+        }
+        return NavGoal.exact(placementRecoveryStance);
+    }
+
+    private void clearPlacementRecovery() {
+        placementRecoveryKey = null;
+        placementRecoveryTarget = null;
+        placementRecoveryStance = null;
+        transientFailureSignature = null;
+        transientFailureObservations = 0;
+    }
+
+    static FailureType failureTypeFor(String reason) {
+        return switch (reason) {
+            case "NO_SUPPORT", "SURVIVAL_FAILED" ->
+                    FailureType.NO_SUPPORT;
+            case "BLOCKED_BY_ENTITY" ->
+                    FailureType.ENTITY_BLOCKED;
+            case "BLOCKED_BY_SELF" ->
+                    FailureType.BOXED_IN;
+            case "OUT_OF_REACH" ->
+                    FailureType.OUT_OF_REACH;
+            case "OCCLUDED", "NO_LINE_OF_SIGHT" ->
+                    FailureType.OCCLUDED;
+            case "STATE_MISMATCH",
+                    "FOOTPRINT_BLOCKED",
+                    "NO_STANDABLE_STANCE",
+                    "NO_FEASIBLE_PLACEMENT",
+                    "NOT_A_PLACEABLE_TARGET" ->
+                    FailureType.TARGET_LOST;
+            default -> FailureType.UNKNOWN;
+        };
     }
 
     private static String stateKey(BlockState state) {
@@ -1315,18 +1474,6 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         return placementRaycastMatches(placement.resolution().hit(), player.getYRot(), player.getXRot());
     }
 
-    private boolean nextTickCanReach(PlaceResolution resolution) {
-        if (placementRaycastMatches(resolution.hit(), player.getYRot(), player.getXRot())) {
-            return true;
-        }
-        if (!resolution.hasRotation()) {
-            return false;
-        }
-        AimProcessor.Rotation next = AIM.step(player.getYRot(), player.getXRot(),
-                resolution.yaw(), resolution.pitch());
-        return placementRaycastMatches(resolution.hit(), next.yaw(), next.pitch());
-    }
-
     private boolean currentCrosshairHits(BlockPos pos) {
         HitResult raw = player.pick(MovementHelper.blockReachDistance(player), 1.0f, false);
         return raw instanceof BlockHitResult hit
@@ -1568,6 +1715,21 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     private record LocalPlacement(BuildTaskRecord.Target target, PlaceResolution resolution, int slot) {}
 
+    private record PlacementDiagnostic(
+            BuildTaskRecord.Target target,
+            String reason,
+            String detail) {
+
+        String render() {
+            return reason + " target="
+                    + target.pos().getX() + ","
+                    + target.pos().getY() + ","
+                    + target.pos().getZ()
+                    + " requested=" + stateKey(target.desiredState())
+                    + "; message=" + detail;
+        }
+    }
+
     private static final class BuildPlan {
         private final List<BuildTaskRecord.Target> placeable = new ArrayList<>();
         private final List<BuildTaskRecord.Target> breakable = new ArrayList<>();
@@ -1596,6 +1758,10 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         }
 
         NavGoal goal(BuildCompanionTask task) {
+            NavGoal recovery = task.recoveryPlacementGoal(placeable);
+            if (recovery != null) {
+                return recovery;
+            }
             List<NavGoal> toPlace = new ArrayList<>();
             Set<BlockPos> pendingFootprints = task.pendingPlacementFootprintPositions();
             for (BuildTaskRecord.Target target : placeable) {

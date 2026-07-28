@@ -78,4 +78,21 @@ class PlacementFeasibilityToolTest {
                         && Math.abs(pos.getZ()) <= 3));
         assertEquals(1, offsets.get(0).distManhattan(BlockPos.ZERO));
     }
+
+    @Test
+    void runtimeAssessmentSeparatesDeterministicAndTransientFailures() {
+        PlacementFeasibilityTool.RuntimeAssessment mismatch =
+                new PlacementFeasibilityTool.RuntimeAssessment(
+                        false, false, "STATE_MISMATCH",
+                        "wrong facing", List.of());
+        PlacementFeasibilityTool.RuntimeAssessment entity =
+                new PlacementFeasibilityTool.RuntimeAssessment(
+                        false, false, "BLOCKED_BY_ENTITY",
+                        "entity in footprint", List.of());
+
+        assertTrue(mismatch.deterministicFailure());
+        assertFalse(mismatch.transientObstacle());
+        assertFalse(entity.deterministicFailure());
+        assertTrue(entity.transientObstacle());
+    }
 }

@@ -1,6 +1,9 @@
 package com.dwinovo.numen.core.pathing.exec;
 
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -63,6 +66,10 @@ public final class PlayerNav {
     private static final double REPLAN_PROGRESS_EPS_H = 4.0;
     /** 目标中心移动超过该距离平方(2 格)即重根。 */
     private static final double GOAL_MOVED_SQR = 4.0;
+    /** Recreated build navigators may rediscover the same in-place goal every tick. */
+    private static final long ARRIVAL_LOG_INTERVAL_TICKS = 5L * 20L;
+    private static final Map<UUID, ArrivalLog> LAST_ARRIVAL_LOG =
+            new ConcurrentHashMap<>();
 
     private final NumenPlayer player;
     private final Supplier<GoalCompiler.Compiled> compiledSupplier;
@@ -329,14 +336,29 @@ public final class PlayerNav {
             BlockPos feet = PathExecutor.playerFeet(player);
             if (engineGoal.isInGoal(feet.getX(), feet.getY(), feet.getZ())) {
                 searchSatisfied = true;
-                Constants.LOG.info(
-                        "[numen-path] ARRIVED-IN-PLACE feet={} goal-center={} —— 搜索目标在脚下"
-                                + "即满足,钉稳结论交任务层裁决",
-                        feet.toShortString(), plannedCenter.toShortString());
+                logArrivalInPlace(feet);
                 return Status.ARRIVED;
             }
         }
         return Status.RUNNING;
+    }
+
+    private void logArrivalInPlace(BlockPos feet) {
+        long tick = player.level().getGameTime();
+        UUID id = player.getUUID();
+        ArrivalLog last = LAST_ARRIVAL_LOG.get(id);
+        if (last != null
+                && last.feet().equals(feet)
+                && last.goalCenter().equals(plannedCenter)
+                && tick - last.tick() < ARRIVAL_LOG_INTERVAL_TICKS) {
+            return;
+        }
+        LAST_ARRIVAL_LOG.put(id, new ArrivalLog(
+                tick, feet.immutable(), plannedCenter.immutable()));
+        Constants.LOG.info(
+                "[numen-path] ARRIVED-IN-PLACE feet={} goal-center={} —— 搜索目标在脚下"
+                        + "即满足,钉稳结论交任务层裁决",
+                feet.toShortString(), plannedCenter.toShortString());
     }
 
     /**
@@ -355,6 +377,8 @@ public final class PlayerNav {
             settings.allowSprint = saved;
         }
     }
+
+    private record ArrivalLog(long tick, BlockPos feet, BlockPos goalCenter) {}
 
     /**
      * 一次失败重规划的记账。进度按目标自己的启发函数在脚下的取值度量
@@ -463,5 +487,4 @@ public final class PlayerNav {
         player.setShiftKeyDown(false);
     }
 }
-
 
