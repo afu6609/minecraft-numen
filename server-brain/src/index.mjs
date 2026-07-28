@@ -231,12 +231,13 @@ export async function run({
           continue;
         }
         if (event.type === "task_finished") {
-          log("info", "background task finished", {
+          log(event.status === "done" ? "info" : "warn", "background task finished", {
             eventId: event.id,
             companion: event.companionName,
             taskId: event.taskId,
             task: event.taskName,
             status: event.status,
+            result: event.message ?? "",
           });
           await brain.handleTaskEvent(event);
           continue;

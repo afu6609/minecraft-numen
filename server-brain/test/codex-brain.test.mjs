@@ -130,6 +130,7 @@ test("task completion returns to the persistent brain for verification", async (
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /Re-perceive the live world/);
   assert.match(prompts[0], /"taskId":"t7"/);
+  assert.match(prompts[0], /"message":"arrived"/);
 });
 
 test("body telemetry is coalesced and re-grounded without forced chat", async () => {

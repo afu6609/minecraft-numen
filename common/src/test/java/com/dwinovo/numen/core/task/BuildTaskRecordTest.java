@@ -18,6 +18,7 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.SlabType;
+import net.minecraft.world.level.block.state.properties.StairsShape;
 import net.minecraft.world.level.material.FluidState;
 
 import org.junit.jupiter.api.AfterEach;
@@ -160,6 +161,39 @@ class BuildTaskRecordTest {
     }
 
     @Test
+    void neighbourDerivedPaneConnectionsDoNotInvalidatePlacedBlock() {
+        assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
+        BlockState desired = Blocks.GLASS_PANE.defaultBlockState();
+        BlockState connected = desired
+                .setValue(BlockStateProperties.NORTH, true)
+                .setValue(BlockStateProperties.SOUTH, true);
+        BuildTaskRecord.Target target = new BuildTaskRecord.Target(desired,
+                Blocks.GLASS_PANE.asItem(), BlockPos.ZERO, "glass_pane", null, null, null);
+
+        assertTrue(target.matches(connected));
+        assertTrue(target.acceptsPlacedState(connected));
+    }
+
+    @Test
+    void neighbourDerivedStairShapeDoesNotHideRequestedFacingOrWaterlogging() {
+        assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
+        BlockState desired = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.NORTH)
+                .setValue(BlockStateProperties.WATERLOGGED, false);
+        BuildTaskRecord.Target target = new BuildTaskRecord.Target(desired,
+                Blocks.OAK_STAIRS.asItem(), BlockPos.ZERO, "oak_stairs", Direction.NORTH, null, null);
+
+        assertTrue(target.matches(desired.setValue(
+                BlockStateProperties.STAIRS_SHAPE, StairsShape.INNER_LEFT)));
+        assertFalse(target.matches(desired
+                .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.EAST)
+                .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.INNER_LEFT)));
+        assertFalse(target.matches(desired
+                .setValue(BlockStateProperties.WATERLOGGED, true)
+                .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.INNER_LEFT)));
+    }
+
+    @Test
     void buildValidityCanIgnoreConfiguredProperties() {
         assumeTrue(booted, "Minecraft 引导不可用,跳过建造规则钉桩");
         NavSettings.get().buildIgnoreProperties().add("waterlogged");
@@ -290,6 +324,5 @@ class BuildTaskRecordTest {
         @Override public int getMinBuildHeight() { return -64; }
     }
 }
-
 
 
