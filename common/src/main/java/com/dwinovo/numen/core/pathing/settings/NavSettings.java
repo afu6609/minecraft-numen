@@ -86,6 +86,14 @@ public final class NavSettings {
     public boolean avoidUpdatingFallingBlocks = true;
     /** 无水情况下可接受的最大坠落高度。 */
     public int maxFallHeightNoWater = 3;
+    /**
+     * 生命充足时无水坠落的自救上限。规划器仍会按预计摔落伤害保留
+     * {@link #minimumHealthAfterAdaptiveFall} 点生命；默认最多下落 6 格，
+     * 足以从常见小屋屋顶脱困，但不会把高崖当普通道路。
+     */
+    public int adaptiveMaxFallHeightNoWater = 6;
+    /** 自适应无水坠落后至少保留的生命值（伤害减免按最坏情况忽略）。 */
+    public float minimumHealthAfterAdaptiveFall = 12.0f;
     /** 持水桶时可接受的最大坠落高度。 */
     public int maxFallHeightBucket = 20;
     /** 允许用剑参与挖掘选材。 */

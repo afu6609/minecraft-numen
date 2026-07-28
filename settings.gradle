@@ -46,5 +46,9 @@ plugins {
 // This should match the folder name of the project, or else IDEA may complain (see https://youtrack.jetbrains.com/issue/IDEA-317606)
 rootProject.name = 'Numen'
 include('common')
-include('fabric')
+// Dedicated-server release/debug loop: avoid configuring Loom and downloading
+// Fabric mappings when only the Forge artifact is requested.
+if (!gradle.startParameter.projectProperties.containsKey('forge_only')) {
+    include('fabric')
+}
 include('forge')

@@ -136,7 +136,11 @@ public class CalculationContext {
         this.allowDiagonalAscend = settings.allowDiagonalAscend;
         this.allowDownward = settings.allowDownward;
         this.minFallHeight = 3;
-        this.maxFallHeightNoWater = settings.maxFallHeightNoWater;
+        this.maxFallHeightNoWater = healthAwareFallHeight(
+                settings.maxFallHeightNoWater,
+                settings.adaptiveMaxFallHeightNoWater,
+                snapshotHealth(player),
+                settings.minimumHealthAfterAdaptiveFall);
         this.maxFallHeightBucket = settings.maxFallHeightBucket;
         this.waterWalkSpeed = computeWaterWalkSpeed(player);
         this.breakBlockAdditionalCost = settings.blockBreakAdditionalPenalty;
@@ -156,6 +160,33 @@ public class CalculationContext {
             }
         }
         this.worldBorder = border;
+    }
+
+    /**
+     * 无水落差的生命预算。前三格不造成摔落伤害；其后按每格 1 点伤害
+     * 的保守上界计算，不计盔甲、保护/摔落保护与伤害吸收。显式配置的
+     * 基础上限始终保留，自适应部分同时受生命余量和小屋级硬上限约束。
+     */
+    static int healthAwareFallHeight(int configured, int adaptiveCap,
+                                     float health, float minimumRemainingHealth) {
+        int baseline = Math.max(0, configured);
+        int cap = Math.max(baseline, adaptiveCap);
+        int damageBudget = Math.max(0,
+                (int) Math.floor(health - Math.max(0.0f, minimumRemainingHealth)));
+        int healthBound = 3 + damageBudget;
+        return Math.max(baseline, Math.min(cap, healthBound));
+    }
+
+    /**
+     * 无构造器测试壳没有实体同步数据；读取失败时关闭自适应，回到零生命
+     * 预算，而不是让成本单测依赖完整世界引导。
+     */
+    private static float snapshotHealth(ServerPlayer player) {
+        try {
+            return player.getHealth();
+        } catch (RuntimeException ignored) {
+            return 0.0f;
+        }
     }
 
     /**

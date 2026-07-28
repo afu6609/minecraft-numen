@@ -70,6 +70,10 @@ public final class PathExecutor {
     private int ticksOnCurrent;
     /** 距上次真实推进(移动完成/重定位/活跃挖掘)的 tick 数,liveness 信号。 */
     private int ticksSinceProgress;
+    /** 当前移动中最近一次可测水平推进的锚点与连续无位移 tick。 */
+    private double horizontalProgressX = Double.NaN;
+    private double horizontalProgressZ = Double.NaN;
+    private int ticksWithoutHorizontalProgress;
     /** 单次 onTick 内递归推进次数守卫:回退扫/SUCCESS 推进后递归 onTick
      * 可能在某 movement 的 SUCCESS 判定与 validPositions 不自洽时空转
      * 爆栈。超过路径长度即判定为病态循环,取消而非继续递归。 */
@@ -312,11 +316,31 @@ public final class PathExecutor {
                 player.setSprinting(false); // 松开按键不会自动停疾跑
             }
             ticksOnCurrent++;
+            boolean pushingForward = harness.isKeyRequested(Input.MOVE_FORWARD);
             // 活跃挖掘算真实推进(硬方块一挖几十 tick 是正常工作)
             if (harness.isDigging()) {
                 ticksSinceProgress = 0;
+                resetHorizontalProgress();
             } else {
                 ticksSinceProgress++;
+                if (pushingForward) {
+                    sampleHorizontalProgress();
+                } else {
+                    resetHorizontalProgress();
+                }
+            }
+            // 薄雪、地毯边缘与碰撞形状接缝偶尔会让原版输入连续顶住
+            // 同一格。只在目标脚下已有可靠支撑、身体落地且确实持续前进
+            // 时给一次原版跳跃脉冲；搭桥/潜行悬边绝不触发。
+            if (shouldNudgeTraverse(
+                    movement instanceof MovementTraverse,
+                    pushingForward,
+                    player.onGround(),
+                    harness.isKeyRequested(Input.SNEAK),
+                    MovementHelper.canWalkOn(player.level(), movement.getDest().below()),
+                    ticksWithoutHorizontalProgress)) {
+                harness.forceKey(Input.JUMP, true);
+                resetHorizontalProgress();
             }
             if (ticksOnCurrent > timedOutAt(currentMovementOriginalCostEstimate,
                     NavSettings.get().movementTimeoutTicks)) {
@@ -810,6 +834,46 @@ public final class PathExecutor {
         harness.clearAllKeys();
         ticksOnCurrent = 0;
         ticksSinceProgress = 0;
+        resetHorizontalProgress();
+    }
+
+    /** 累积移动至少 0.04 格才算真实水平推进，滤掉碰撞抖动。 */
+    private void sampleHorizontalProgress() {
+        double x = player.getX();
+        double z = player.getZ();
+        if (Double.isNaN(horizontalProgressX)) {
+            horizontalProgressX = x;
+            horizontalProgressZ = z;
+            ticksWithoutHorizontalProgress = 0;
+            return;
+        }
+        double dx = x - horizontalProgressX;
+        double dz = z - horizontalProgressZ;
+        if (dx * dx + dz * dz >= 0.04 * 0.04) {
+            horizontalProgressX = x;
+            horizontalProgressZ = z;
+            ticksWithoutHorizontalProgress = 0;
+        } else {
+            ticksWithoutHorizontalProgress++;
+        }
+    }
+
+    private void resetHorizontalProgress() {
+        horizontalProgressX = Double.NaN;
+        horizontalProgressZ = Double.NaN;
+        ticksWithoutHorizontalProgress = 0;
+    }
+
+    /** 无头可测的浅台阶脱困闸门。 */
+    static boolean shouldNudgeTraverse(boolean traverse, boolean pushingForward,
+                                       boolean onGround, boolean sneaking,
+                                       boolean destinationSupported, int stalledTicks) {
+        return traverse
+                && pushingForward
+                && onGround
+                && !sneaking
+                && destinationSupported
+                && stalledTicks >= 12;
     }
 
     /** 移动的人话描述(失败原因素材):类型 + 起讫格。 */

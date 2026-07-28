@@ -251,6 +251,19 @@ class PathExecutorLogicTest {
         assertEquals(100.0, PathExecutor.timedOutAt(0.0, 100));
     }
 
+    /** 普通有支撑平移连续顶住 12 tick 后才给跳跃脱困脉冲。 */
+    @Test
+    void traverseNudgeRequiresARealSupportedStall() {
+        assertFalse(PathExecutor.shouldNudgeTraverse(true, true, true, false, true, 11));
+        assertTrue(PathExecutor.shouldNudgeTraverse(true, true, true, false, true, 12));
+        assertFalse(PathExecutor.shouldNudgeTraverse(true, true, true, true, true, 20),
+                "潜行悬边时不可跳");
+        assertFalse(PathExecutor.shouldNudgeTraverse(true, true, true, false, false, 20),
+                "目标无支撑时不可跳");
+        assertFalse(PathExecutor.shouldNudgeTraverse(false, true, true, false, true, 20),
+                "下降/坠落等原语不可被平移脱困逻辑篡改");
+    }
+
     // ==================== 前瞻成本核验(纯逻辑,FakeMovement 不读 context) ====================
 
     /** 前瞻窗口内全可行 → -1。 */

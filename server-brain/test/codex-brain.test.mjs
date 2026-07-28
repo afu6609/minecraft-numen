@@ -112,6 +112,8 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   assert.match(prompts[0], /expected_revision/);
   assert.match(prompts[0], /never resend its whole blueprint/);
   assert.match(prompts[0], /saved coordinates/);
+  assert.match(prompts[0], /submit the concrete next action before send_chat/);
+  assert.match(prompts[0], /Only after an action tool has actually returned/);
 });
 
 test("task completion returns to the persistent brain for verification", async () => {
@@ -147,6 +149,8 @@ test("task completion returns to the persistent brain for verification", async (
   assert.match(prompts[0], /Re-perceive the live world/);
   assert.match(prompts[0], /"taskId":"t7"/);
   assert.match(prompts[0], /"message":"arrived"/);
+  assert.match(prompts[0], /Submit that next action before reporting a retry/);
+  assert.match(prompts[0], /actually returns an accepted task_id/);
 });
 
 test("repeated state mismatch trips the placement retry fuse despite goto", async () => {
