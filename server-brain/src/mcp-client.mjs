@@ -48,6 +48,18 @@ export class NumenMcpClient {
     return events;
   }
 
+  async pollCompanionEvents(companion, limit = 16) {
+    const text = await this.callTool("poll_companion_events", {
+      companion,
+      limit,
+    });
+    const events = JSON.parse(text);
+    if (!Array.isArray(events)) {
+      throw new Error("poll_companion_events did not return an array");
+    }
+    return events;
+  }
+
   async sendChat(companion, message) {
     return this.callTool("send_chat", { companion, message });
   }

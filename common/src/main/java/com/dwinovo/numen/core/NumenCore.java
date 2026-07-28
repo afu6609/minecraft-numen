@@ -71,6 +71,7 @@ public final class NumenCore {
         registerTaskRunners();
         registerChains();
         registerReflexes();
+        registerLifecycleEvents();
         // Enable the autonomous survival chains (auto-eat / mob-defense / unstuck /
         // MLG). SurvivalConfig's own default is OFF — the safe state a bare library
         // build ships with — and the pack turns it on here, explicitly, at init.
@@ -104,6 +105,27 @@ public final class NumenCore {
      */
     private static void registerReflexes() {
         com.dwinovo.numen.core.task.reflex.CoreReflexes.registerAll();
+    }
+
+    private static void registerLifecycleEvents() {
+        CompanionLifecycle.onDeath(companion -> {
+            java.util.Map<String, Object> data =
+                    new java.util.LinkedHashMap<>(
+                            com.dwinovo.numen.core.event.CompanionEventBus.bodySnapshot(companion));
+            var damage = com.dwinovo.numen.core.task.survival.ThreatMemory.recent(companion);
+            if (damage != null) {
+                data.put("last_damage_type", damage.damageType());
+                data.put("last_source_type", damage.sourceType());
+                data.put("last_damage", damage.amount());
+            }
+            com.dwinovo.numen.core.event.CompanionEventBus.publish(
+                    companion,
+                    "death",
+                    com.dwinovo.numen.core.event.CompanionEventBus.PRIORITY_URGENT,
+                    "The companion body died; its active body task was dropped.",
+                    data);
+            com.dwinovo.numen.core.task.survival.ThreatMemory.clear(companion.getUUID());
+        });
     }
 
     private static void registerTools() {
@@ -148,6 +170,7 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetWorldInfoTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.TodoWriteTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LoadSkillTool());   // raw NumenTool
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.PollCompanionEventsTool());
     }
 
 

@@ -7,6 +7,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingDamageEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
@@ -32,6 +33,7 @@ public class NumenCoreForge {
         NumenCore.init();
 
         MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onServerTickPost);
+        MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onLivingDamage);
         // Release pathfinding chunk-ref snapshots when the server stops (don't pin an old world).
         MinecraftForge.EVENT_BUS.addListener((ServerStoppedEvent e) -> PathCaches.dropAll());
         // Debug verbs merged into the /numen root registered by the engine mod.
@@ -67,5 +69,12 @@ public class NumenCoreForge {
         PathCaches.serverTick(server);
         // Debug particles for pathing state, sent only to players with debug on.
         com.dwinovo.numen.core.debug.PathDebugRenderer.serverTick(server);
+    }
+
+    private static void onLivingDamage(LivingDamageEvent event) {
+        if (event.getEntity() instanceof com.dwinovo.numen.entity.NumenPlayer companion) {
+            com.dwinovo.numen.core.task.survival.ThreatMemory.recordDamage(
+                    companion, event.getSource(), event.getAmount());
+        }
     }
 }

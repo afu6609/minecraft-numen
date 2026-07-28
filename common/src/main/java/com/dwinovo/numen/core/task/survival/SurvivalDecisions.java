@@ -16,7 +16,7 @@ import com.dwinovo.numen.task.TaskChain;
  * mob is next; hunger (a slow drain) next; being stuck (annoying, not lethal) is
  * the lowest survival concern and must never outrank fighting or eating. All sit
  * above the LLM base (0) so any firing survival concern preempts the task:
- * <pre>  MLG(10) &gt; breath(6) &gt; mob-defense(5) &gt; food-regen(4) &gt; food-hunger(3) &gt; unstuck(2) &gt; llm(0)</pre>
+ * <pre>  MLG(10) &gt; breath(6) &gt; mob-defense(5) &gt; food-regen(4) &gt; safe-recovery(3.5) &gt; food-hunger(3) &gt; unstuck(2) &gt; llm(0)</pre>
  */
 public final class SurvivalDecisions {
 
@@ -30,6 +30,8 @@ public final class SurvivalDecisions {
     public static final float BREATH_PRIORITY = 6.0f;
     public static final float MOB_DEFENSE_PRIORITY = 5.0f;
     public static final float FOOD_REGEN_PRIORITY = 4.0f;
+    /** Lets FoodChain finish a healing meal once melee danger has been opened to a safe distance. */
+    public static final float MOB_SAFE_RECOVERY_PRIORITY = 3.5f;
     public static final float FOOD_HUNGER_PRIORITY = 3.0f;
     public static final float UNSTUCK_PRIORITY = 2.0f;
     // ---- food thresholds (vanilla FoodData is 0..20) ----
@@ -42,7 +44,7 @@ public final class SurvivalDecisions {
 
     // ---- threat thresholds ----
     /** Health (of 20) at/below which we always flee rather than trade blows. */
-    public static final float FLEE_HEALTH = 8.0f;
+    public static final float FLEE_HEALTH = 12.0f;
 
     // ---- fall thresholds ----
     /** Fall distance (blocks) above which an MLG save is worth attempting (vanilla fall damage &gt; 1 heart). */
@@ -68,14 +70,36 @@ public final class SurvivalDecisions {
      * when unarmed (survival never auto-acquires a weapon); otherwise fight back.
      */
     public static ThreatResponse decideThreatResponse(boolean threatPresent, float health, boolean armed) {
+        return decideThreatResponse(threatPresent, health, armed, false, 1);
+    }
+
+    /**
+     * Richer fight-vs-flee decision for the live defense chain. Some opponents
+     * (creepers, players, iron golems) should never be traded with by the
+     * background reflex, and a badly outnumbered body should disengage even if
+     * it happens to be holding a sword.
+     */
+    public static ThreatResponse decideThreatResponse(
+            boolean threatPresent,
+            float health,
+            boolean armed,
+            boolean forceFlee,
+            int engagedThreats) {
         if (!threatPresent) return ThreatResponse.NONE;
-        if (health <= FLEE_HEALTH) return ThreatResponse.FLEE;
+        if (health <= FLEE_HEALTH || forceFlee || engagedThreats >= 3) {
+            return ThreatResponse.FLEE;
+        }
         return armed ? ThreatResponse.FIGHT : ThreatResponse.FLEE;
     }
 
     /** How much the mob-defense chain wants the body: a fixed spike while a threat is present. */
     public static float mobDefensePriority(boolean threatPresent) {
         return threatPresent ? MOB_DEFENSE_PRIORITY : DORMANT;
+    }
+
+    public static float mobDefensePriority(boolean threatPresent, boolean yieldForHealingFood) {
+        if (!threatPresent) return DORMANT;
+        return yieldForHealingFood ? MOB_SAFE_RECOVERY_PRIORITY : MOB_DEFENSE_PRIORITY;
     }
 
     /**

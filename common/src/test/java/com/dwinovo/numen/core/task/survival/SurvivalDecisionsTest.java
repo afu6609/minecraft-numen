@@ -70,13 +70,28 @@ class SurvivalDecisionsTest {
     @Test
     void lowHealthFleesEvenWhenArmed() {
         assertEquals(ThreatResponse.FLEE,
-                SurvivalDecisions.decideThreatResponse(true, 4.0f, true));
+                SurvivalDecisions.decideThreatResponse(true, 12.0f, true));
     }
 
     @Test
     void unarmedFleesEvenWhenHealthy() {
         assertEquals(ThreatResponse.FLEE,
                 SurvivalDecisions.decideThreatResponse(true, 20.0f, false));
+    }
+
+    @Test
+    void dangerousOrOverwhelmingThreatForcesRetreat() {
+        assertEquals(ThreatResponse.FLEE,
+                SurvivalDecisions.decideThreatResponse(true, 20.0f, true, true, 1));
+        assertEquals(ThreatResponse.FLEE,
+                SurvivalDecisions.decideThreatResponse(true, 20.0f, true, false, 3));
+    }
+
+    @Test
+    void defenseYieldsOnlyBelowHealingFoodPriority() {
+        float recovery = SurvivalDecisions.mobDefensePriority(true, true);
+        assertTrue(recovery < SurvivalDecisions.FOOD_REGEN_PRIORITY);
+        assertTrue(recovery > SurvivalDecisions.FOOD_HUNGER_PRIORITY);
     }
 
     // ---- MLG ----

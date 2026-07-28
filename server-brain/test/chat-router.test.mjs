@@ -32,8 +32,10 @@ test("classifier must return one unique decision per event", () => {
 
 test("router passes a strict output schema to the small-model thread", async () => {
   let receivedOptions;
+  let receivedPrompt;
   const router = new ChatRouter(() => ({
-    async run(_prompt, options) {
+    async run(prompt, options) {
+      receivedPrompt = prompt;
       receivedOptions = options;
       return {
         finalResponse: JSON.stringify({
@@ -51,4 +53,7 @@ test("router passes a strict output schema to the small-model thread", async () 
 
   assert.equal(receivedOptions.outputSchema.type, "object");
   assert.deepEqual(decisions.map((item) => item.route), ["ignore", "ignore"]);
+  assert.match(receivedPrompt, /current location\/status\/progress/);
+  assert.match(receivedPrompt, /stuck\/not moving\/doing the wrong thing/);
+  assert.match(receivedPrompt, /must never promise a future world change/);
 });

@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.core.task.BuildTaskRecord;
+import com.dwinovo.numen.core.task.MultiBlockPlacement;
 import com.dwinovo.numen.core.task.PlayerInv;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.google.gson.JsonArray;
@@ -50,7 +51,7 @@ final class StructureWorkflowAssessment {
             }
 
             BlockState current = self.level().getBlockState(pos);
-            if (target.matches(current)) {
+            if (MultiBlockPlacement.matches(self.level(), target)) {
                 out.matched++;
             } else {
                 out.buildCandidates.add(target);

@@ -39,6 +39,7 @@ import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -78,6 +79,8 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private static final double[] PLACEMENT_FACE_SAMPLES = {0.25, 0.5, 0.75};
 
     private final Map<Long, BuildTaskRecord.Target> targetByPos = new LinkedHashMap<>();
+    /** Vanilla creates these partner cells atomically (bed head / door upper half). */
+    private final Map<Long, BuildTaskRecord.Target> partnerOwnerByPos = new LinkedHashMap<>();
     private final BlockDigger digger;
     private final Set<BlockPos> noSupport = new HashSet<>();
 
@@ -95,12 +98,20 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private int stallTicks;
     private int highWaterCompleted;
     private String note = "done";
+    private BlockPos suspendedAt;
+    private net.minecraft.resources.ResourceKey<Level> suspendedDimension;
 
     public BuildCompanionTask(NumenPlayer player, BuildTaskRecord record) {
         super(player, record);
         this.digger = new BlockDigger(player);
         for (BuildTaskRecord.Target target : record.targets) {
             targetByPos.put(target.pos().asLong(), target);
+        }
+        for (BuildTaskRecord.Target target : record.targets) {
+            PlacementCell partner = partnerCell(target);
+            if (partner != null && !targetByPos.containsKey(partner.pos().asLong())) {
+                partnerOwnerByPos.put(partner.pos().asLong(), target);
+            }
         }
     }
 
@@ -115,9 +126,18 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         }
         for (BuildTaskRecord.Target target : r.targets) {
             BlockState state = player.level().getBlockState(target.pos());
-            if (!target.matches(state) && (isAirTarget(target) || !isReplaceable(target.pos(), state))) {
+            if (!targetMatches(player.level(), target)
+                    && (isAirTarget(target) || !isReplaceable(target.pos(), state))) {
                 return new Precondition.Failure("target " + target.shortPos()
                         + " is occupied; enable replacement or clear it first", FailureType.TARGET_LOST);
+            }
+            PlacementCell blockedPartner = firstBlockingPartner(target);
+            if (!targetMatches(player.level(), target) && blockedPartner != null) {
+                return new Precondition.Failure("partner cell "
+                        + blockedPartner.pos().toShortString()
+                        + " required by " + target.label()
+                        + " is occupied; enable replacement or clear it first",
+                        FailureType.TARGET_LOST);
             }
         }
         return null;
@@ -139,6 +159,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     @Override
     protected TaskState onTick() {
+        refreshAfterExternalDisplacement();
         // SNEAK 每 tick 重新决策:默认站立,仅放置、及破坏时若上一 tick 仍在蹲才按下——
         // 避免搭完/动作间残留蹲姿(输入为持久状态,不像客户端 force-state 会自动清零)。
         boolean wasSneaking = player.isShiftKeyDown();
@@ -237,8 +258,14 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private TaskState tickBreak(boolean wasSneaking) {
         BuildTaskRecord.Target target = activeBreak;
         BlockState state = player.level().getBlockState(target.pos());
-        if (target.matches(state) || state.isAir() || state.getBlock() instanceof LiquidBlock) {
-            markObserved(target, target.matches(state));
+        boolean blueprintTarget = targetByPos.get(target.pos().asLong()) == target;
+        boolean matches = blueprintTarget
+                ? targetMatches(player.level(), target)
+                : target.matches(state);
+        if (matches || state.isAir() || state.getBlock() instanceof LiquidBlock) {
+            if (blueprintTarget) {
+                markObserved(target, matches);
+            }
             activeBreak = null;
             digger.cancel();
             return TaskState.RUNNING;
@@ -271,7 +298,9 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         switch (digger.digTargetStep(target.pos())) {
             case BROKE_TARGET -> {
                 r.brokeOne();
-                markObserved(target, false);
+                if (blueprintTarget) {
+                    markObserved(target, false);
+                }
                 activeBreak = null;
                 placeDelayTicks = POST_BREAK_PLACE_DELAY_TICKS;
                 clearNoShot();
@@ -304,7 +333,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     private TaskState tickPlace(LocalPlacement placement) {
         BuildTaskRecord.Target target = placement.target();
-        if (target.matches(player.level().getBlockState(target.pos()))) {
+        if (targetMatches(player.level(), target)) {
             markObserved(target, true);
             return TaskState.RUNNING;
         }
@@ -327,7 +356,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         player.holdInHand(slot);
         Interaction use = Interaction.useBlock(player, placement.resolution().hit(), InteractionHand.MAIN_HAND);
         use.tick();
-        if (target.matches(player.level().getBlockState(target.pos()))) {
+        if (targetMatches(player.level(), target)) {
             r.placedOne();
             noSupport.clear();
             markObserved(target, true);
@@ -360,6 +389,15 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                             && r.replaceExisting
                             && MovementHelper.reachableAimPoint(player, target.pos()) != null) {
                         return target;
+                    }
+                    BuildTaskRecord.Target partnerOwner = partnerOwnerByPos.get(pos.asLong());
+                    if (partnerOwner != null
+                            && (!usesLayers() || partnerOwner.pos().getY() <= layerTop)
+                            && !targetMatches(player.level(), partnerOwner)
+                            && isBlockingPartnerCell(partnerOwner, pos)
+                            && r.replaceExisting
+                            && MovementHelper.reachableAimPoint(player, pos) != null) {
+                        return partnerClearTarget(partnerOwner, pos);
                     }
                 }
             }
@@ -440,9 +478,19 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                 continue;
             }
             BlockState state = player.level().getBlockState(pos);
-            if (target.matches(state)) {
+            if (targetMatches(player.level(), target)) {
                 // 遍历中不动 incorrectPositions,命中格先记下,循环后统一登记(避免并发改集合)。
                 completed.add(target);
+                continue;
+            }
+            PlacementCell blockedPartner = firstBlockingPartner(target);
+            if (blockedPartner != null) {
+                if (r.replaceExisting
+                        && !targetByPos.containsKey(blockedPartner.pos().asLong())) {
+                    plan.breakable.add(partnerClearTarget(target, blockedPartner.pos()));
+                } else {
+                    noSupport.add(target.pos());
+                }
                 continue;
             }
             if (state.getBlock() instanceof LiquidBlock) {
@@ -488,12 +536,15 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         if (!player.level().getBlockState(pos).isAir()) {
             return goalPlace(pos);
         }
+        Set<BlockPos> excludedFeet = placementFootprintPositions(target);
         boolean allowSameLevel = !player.level().getBlockState(pos.above()).isAir();
         for (Direction facing : PLACE_GOAL_FACES) {
             BlockPos against = pos.relative(facing);
             if (MovementHelper.canPlaceAgainst(player.level(), against)
-                    && placementPlausible(pos, target.desiredState())) {
-                return goalAdjacent(pos, against, allowSameLevel);
+                    && placementBlockSpaceAvailable(pos, target.desiredState())) {
+                Set<BlockPos> excluded = new HashSet<>(excludedFeet);
+                excluded.add(against.immutable());
+                return goalAdjacent(pos, excluded, allowSameLevel);
             }
         }
         return goalPlace(pos);
@@ -551,12 +602,12 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         };
     }
 
-    private NavGoal goalAdjacent(BlockPos target, BlockPos no, boolean allowSameLevel) {
+    private NavGoal goalAdjacent(BlockPos target, Set<BlockPos> excludedFeet, boolean allowSameLevel) {
         BlockPos t = target.immutable();
-        BlockPos excluded = no.immutable();
+        Set<BlockPos> excluded = Set.copyOf(excludedFeet);
         return new NavGoal() {
             @Override public boolean isAt(BlockPos feet) {
-                if (feet.equals(t) || feet.equals(excluded)) {
+                if (excluded.contains(feet)) {
                     return false;
                 }
                 if (!allowSameLevel && feet.getY() == t.getY() - 1) {
@@ -681,7 +732,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
                     if (target == null || (usesLayers() && target.pos().getY() > layerTop)) {
                         continue;
                     }
-                    markObserved(target, target.matches(player.level().getBlockState(target.pos())));
+                    markObserved(target, targetMatches(player.level(), target));
                 }
             }
         }
@@ -695,8 +746,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             BlockPos pos = target.pos();
             boolean loaded = loadedView == null || loadedView.isLoaded(pos.getX(), pos.getZ());
             if (loaded) {
-                BlockState state = view.getBlockState(pos);
-                if (target.matches(state)) {
+                if (targetMatches(view, target)) {
                     observedCompleted.add(pos.asLong());
                 } else {
                     incorrectPositions.add(pos);
@@ -783,7 +833,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             BlockPos pos = target.pos();
             boolean loaded = loadedView == null || loadedView.isLoaded(pos.getX(), pos.getZ());
             if (loaded) {
-                boolean completed = target.matches(view.getBlockState(pos));
+                boolean completed = targetMatches(view, target);
                 markObserved(target, completed);
                 if (!completed) {
                     return false;
@@ -814,7 +864,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             return out;
         }
         for (BuildTaskRecord.Target target : activeLayerTargets()) {
-            if (!target.matches(player.level().getBlockState(target.pos()))) {
+            if (!targetMatches(player.level(), target)) {
                 out.add(target.pos());
             }
         }
@@ -837,7 +887,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private boolean canStartLocalPlace(BuildTaskRecord.Target target) {
         return !noSupport.contains(target.pos())
                 && !isAirTarget(target)
-                && !target.matches(player.level().getBlockState(target.pos()))
+                && !targetMatches(player.level(), target)
                 && (player.level().getBlockState(target.pos()).isAir() || !r.replaceExisting)
                 && isReplaceable(target.pos())
                 && hasItem(target.item(), true)
@@ -966,13 +1016,13 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private boolean incompleteTargetAt(BlockPos pos) {
         BuildTaskRecord.Target target = targetByPos.get(pos.asLong());
         return target != null && (!usesLayers() || target.pos().getY() <= layerTop)
-                && !target.matches(player.level().getBlockState(target.pos()));
+                && !targetMatches(player.level(), target);
     }
 
     private boolean needsBreak(BuildTaskRecord.Target target) {
         BlockState state = player.level().getBlockState(target.pos());
         return !(state.getBlock() instanceof LiquidBlock)
-                && !target.matches(state)
+                && !targetMatches(player.level(), target)
                 && (isAirTarget(target) || !state.isAir());
     }
 
@@ -992,7 +1042,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
     private boolean safeToBreak(BlockPos pos) {
         BuildTaskRecord.Target target = targetByPos.get(pos.asLong());
         BlockState state = player.level().getBlockState(pos);
-        if (target != null && target.matches(state)) {
+        if (target != null && targetMatches(player.level(), target)) {
             return false;
         }
         return !BlockHelper.shouldAvoidBreaking(player.level(), pos);
@@ -1000,15 +1050,103 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     private boolean placementPlausible(BlockPos pos, BlockState state) {
         Level level = player.level();
-        VoxelShape shape = state.getCollisionShape(level, pos);
-        return shape.isEmpty() || level.isUnobstructed(null,
-                shape.move(pos.getX(), pos.getY(), pos.getZ()));
+        if (!placementBlockSpaceAvailable(pos, state)) {
+            return false;
+        }
+        for (PlacementCell cell : placementFootprint(pos, state)) {
+            VoxelShape shape = cell.state().getCollisionShape(level, cell.pos());
+            if (!shape.isEmpty() && !level.isUnobstructed(null,
+                    shape.move(cell.pos().getX(), cell.pos().getY(), cell.pos().getZ()))) {
+                return false;
+            }
+        }
+        return true;
     }
+
+    private boolean placementBlockSpaceAvailable(BlockPos pos, BlockState state) {
+        Level level = player.level();
+        for (PlacementCell cell : placementFootprint(pos, state)) {
+            if (cell.state().getBlock() instanceof BedBlock
+                    && !cell.state().canSurvive(level, cell.pos())) {
+                return false;
+            }
+            if (!cell.pos().equals(pos)) {
+                BlockState existing = level.getBlockState(cell.pos());
+                if (!isReplaceable(cell.pos(), existing)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private boolean blockedByOtherEntity(BlockPos pos, BlockState state) {
-        VoxelShape shape = state.getCollisionShape(player.level(), pos);
-        return !shape.isEmpty() && !player.level().isUnobstructed(player,
-                shape.move(pos.getX(), pos.getY(), pos.getZ()));
+        Level level = player.level();
+        for (PlacementCell cell : placementFootprint(pos, state)) {
+            VoxelShape shape = cell.state().getCollisionShape(level, cell.pos());
+            if (!shape.isEmpty() && !level.isUnobstructed(player,
+                    shape.move(cell.pos().getX(), cell.pos().getY(), cell.pos().getZ()))) {
+                return true;
+            }
+        }
+        return false;
     }
+
+    private boolean targetMatches(BlockGetter view, BuildTaskRecord.Target target) {
+        return MultiBlockPlacement.matches(view, target);
+    }
+
+    private PlacementCell firstBlockingPartner(BuildTaskRecord.Target target) {
+        List<PlacementCell> footprint =
+                placementFootprint(target.pos(), target.desiredState());
+        for (int i = 1; i < footprint.size(); i++) {
+            PlacementCell cell = footprint.get(i);
+            if (!isReplaceable(cell.pos(), player.level().getBlockState(cell.pos()))) {
+                return cell;
+            }
+        }
+        return null;
+    }
+
+    private boolean isBlockingPartnerCell(BuildTaskRecord.Target owner, BlockPos pos) {
+        PlacementCell partner = partnerCell(owner);
+        return partner != null
+                && partner.pos().equals(pos)
+                && !isReplaceable(pos, player.level().getBlockState(pos));
+    }
+
+    private BuildTaskRecord.Target partnerClearTarget(
+            BuildTaskRecord.Target owner, BlockPos partnerPos) {
+        return new BuildTaskRecord.Target(
+                Blocks.AIR.defaultBlockState(),
+                owner.item(),
+                partnerPos,
+                "clear partner cell for " + owner.label(),
+                null,
+                null,
+                null);
+    }
+
+    private Set<BlockPos> placementFootprintPositions(BuildTaskRecord.Target target) {
+        Set<BlockPos> positions = new HashSet<>();
+        for (PlacementCell cell : placementFootprint(target.pos(), target.desiredState())) {
+            positions.add(cell.pos());
+        }
+        return positions;
+    }
+
+    private static PlacementCell partnerCell(BuildTaskRecord.Target target) {
+        List<PlacementCell> cells =
+                placementFootprint(target.pos(), target.desiredState());
+        return cells.size() > 1 ? cells.get(1) : null;
+    }
+
+    private static List<PlacementCell> placementFootprint(BlockPos pos, BlockState state) {
+        return MultiBlockPlacement.footprint(pos, state).stream()
+                .map(cell -> new PlacementCell(cell.pos(), cell.state()))
+                .toList();
+    }
+
     private boolean hasItem(Item item) {
         return mainInventoryCount(item) > 0;
     }
@@ -1123,7 +1261,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             BlockPos pos = target.pos();
             boolean loaded = loadedView == null || loadedView.isLoaded(pos.getX(), pos.getZ());
             if (loaded) {
-                if (target.matches(view.getBlockState(pos))) {
+                if (targetMatches(view, target)) {
                     observedCompleted.add(pos.asLong());
                     completed++;
                 } else {
@@ -1263,7 +1401,7 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
         if (isAirTarget(target)) {
             return null;
         }
-        if (target.matches(player.level().getBlockState(target.pos()))) {
+        if (targetMatches(player.level(), target)) {
             return null;
         }
         return target.desiredState();
@@ -1291,13 +1429,47 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
 
     @Override
     public void suspend() {
+        suspendedAt = playerFeet().immutable();
+        suspendedDimension = player.level().dimension();
         super.suspend();
         unregisterProvider();
     }
 
     @Override
     public void resume() {
+        // Current 0.0.7 schedulers resume by ticking the task again and do not
+        // invoke this hook. Keep it useful for newer engines; onTick performs the
+        // same guarded refresh as the compatibility path.
+        refreshAfterExternalDisplacement();
         registerProvider();
+    }
+
+    private void refreshAfterExternalDisplacement() {
+        if (suspendedAt == null) {
+            return;
+        }
+        BlockPos now = playerFeet();
+        boolean changedDimension = suspendedDimension != null
+                && !suspendedDimension.equals(player.level().dimension());
+        boolean moved = changedDimension || suspendedAt.distSqr(now) > 2.25;
+        suspendedAt = null;
+        suspendedDimension = null;
+        if (!moved) {
+            return;
+        }
+
+        // A fight/flee reflex may have moved the body far away from the stance
+        // encoded in the preserved path. Re-ground from the live feet instead of
+        // walking the obsolete route or repeatedly declaring ARRIVED there.
+        stopNav();
+        digger.cancel();
+        activeBreak = null;
+        incorrectPositions = null;
+        noSupport.clear();
+        clearNoShot();
+        emptyArrivalTicks = 0;
+        stallTicks = 0;
+        note = "re-planning after an emergency moved the body";
     }
 
     @Override
@@ -1363,6 +1535,8 @@ public final class BuildCompanionTask extends AbstractCompanionTask<BuildTaskRec
             return primary.center();
         }
     }
+
+    private record PlacementCell(BlockPos pos, BlockState state) {}
 
     private record LocalPlacement(BuildTaskRecord.Target target, PlaceResolution resolution, int slot) {}
 

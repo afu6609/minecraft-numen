@@ -46,6 +46,7 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
     constructed[1].config.mcp_servers.numen.disabled_tools,
     [
       "poll_server_events",
+      "poll_companion_events",
       "create_companion",
       "delete_companion",
       "run_command",
@@ -129,6 +130,43 @@ test("task completion returns to the persistent brain for verification", async (
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /Re-perceive the live world/);
   assert.match(prompts[0], /"taskId":"t7"/);
+});
+
+test("body telemetry is coalesced and re-grounded without forced chat", async () => {
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        prompts.push(prompt);
+        return { items: [] };
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  brain.noteBodyEvent({
+    id: "body-1",
+    type: "damage_received",
+    data: { source_type: "minecraft:skeleton" },
+  });
+  brain.noteBodyEvent({
+    id: "body-2",
+    type: "defense_started",
+    data: { engaged_threats: 2 },
+  });
+  const result = await brain.handleBodyEvent({
+    id: "body-3",
+    type: "defense_finished",
+    data: { displaced_distance: 8.5 },
+  });
+
+  assert.deepEqual(result, { interrupted: false });
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /get_self_status and task_status/);
+  assert.match(prompts[0], /structure_status/);
+  assert.match(prompts[0], /"body-1"/);
+  assert.match(prompts[0], /"body-3"/);
 });
 
 test("direct control interrupts an active Codex turn without a corrective retry", async () => {

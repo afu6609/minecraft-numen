@@ -25,6 +25,19 @@ function log(level, message, details = {}) {
   process.stdout.write(`${JSON.stringify(entry)}\n`);
 }
 
+function inboxPriority(event) {
+  if (
+    event?.type === "damage_received" ||
+    event?.type === "defense_started" ||
+    event?.type === "defense_finished" ||
+    event?.type === "death" ||
+    event?.type === "body_available"
+  ) {
+    return 2;
+  }
+  return event?.type === "task_finished" ? 1 : 0;
+}
+
 async function verifyMcp(client) {
   await client.initialize();
   const tools = await client.listTools();
@@ -32,6 +45,7 @@ async function verifyMcp(client) {
   for (const required of [
     "list_companions",
     "poll_server_events",
+    "poll_companion_events",
     "send_chat",
     "run_command",
     "task_stop",
@@ -86,10 +100,32 @@ export async function run({
   let pollerError = null;
   const poller = (async () => {
     let consecutiveErrors = 0;
+    let bodyPollErrors = 0;
     try {
       do {
         try {
           const events = await client.pollServerEvents(config.eventBatchSize);
+          let bodyEvents = [];
+          try {
+            bodyEvents = await client.pollCompanionEvents(
+              config.companion,
+              config.eventBatchSize,
+            );
+            if (bodyPollErrors > 0) {
+              log("info", "companion telemetry poll recovered", {
+                previousErrors: bodyPollErrors,
+              });
+            }
+            bodyPollErrors = 0;
+          } catch (error) {
+            bodyPollErrors += 1;
+            if (bodyPollErrors === 1 || bodyPollErrors % 10 === 0) {
+              log("warn", "companion telemetry temporarily unavailable", {
+                error: error instanceof Error ? error.message : String(error),
+                consecutiveErrors: bodyPollErrors,
+              });
+            }
+          }
           for (const event of events) {
             const controlRequest = parseStopRequest(event);
             const commandRequest = parseServerCommandRequest(
@@ -114,6 +150,26 @@ export async function run({
               event,
               decision: null,
               commandRequest,
+            });
+          }
+          for (const event of bodyEvents) {
+            if (event.type === "defense_started" || event.type === "death") {
+              const interruptedTurn = brain.interrupt();
+              log(
+                event.type === "death" ? "warn" : "info",
+                "urgent body event interrupted stale reasoning",
+                {
+                  eventId: event.id,
+                  companion: event.companionName,
+                  type: event.type,
+                  interruptedTurn,
+                },
+              );
+            }
+            inbox.push({
+              event,
+              decision: null,
+              commandRequest: null,
             });
           }
           consecutiveErrors = 0;
@@ -145,6 +201,10 @@ export async function run({
     while (true) {
       const pending = await inbox.takeAll();
       if (pending.length === 0 && inbox.closed) break;
+      pending.sort(
+        (left, right) =>
+          inboxPriority(right.event) - inboxPriority(left.event),
+      );
 
       const unclassified = pending.filter(
         (item) =>
@@ -179,6 +239,31 @@ export async function run({
             status: event.status,
           });
           await brain.handleTaskEvent(event);
+          continue;
+        }
+        if (
+          event.type === "damage_received" ||
+          event.type === "defense_started" ||
+          event.type === "death"
+        ) {
+          brain.noteBodyEvent(event);
+          log("info", "companion body event buffered", {
+            eventId: event.id,
+            companion: event.companionName,
+            type: event.type,
+          });
+          continue;
+        }
+        if (
+          event.type === "defense_finished" ||
+          event.type === "body_available"
+        ) {
+          log("info", "companion body context re-grounding", {
+            eventId: event.id,
+            companion: event.companionName,
+            type: event.type,
+          });
+          await brain.handleBodyEvent(event);
           continue;
         }
         if (event.type !== "player_chat") {

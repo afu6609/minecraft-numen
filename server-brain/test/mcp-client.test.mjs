@@ -40,8 +40,13 @@ test("MCP client authenticates and parses queued events", async (t) => {
   );
 
   const events = await client.pollServerEvents(4);
+  const bodyEvents = await client.pollCompanionEvents("momo", 6);
 
   assert.equal(events[0].message, "hi");
+  assert.equal(bodyEvents[0].message, "hi");
   assert.equal(requests[0].rpc.params.name, "poll_server_events");
+  assert.equal(requests[1].rpc.params.name, "poll_companion_events");
+  assert.equal(requests[1].rpc.params.arguments.companion, "momo");
+  assert.equal(requests[1].rpc.params.arguments.limit, 6);
   assert.equal(requests[0].authorization, "Bearer secret");
 });

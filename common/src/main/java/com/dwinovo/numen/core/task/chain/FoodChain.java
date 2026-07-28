@@ -133,7 +133,11 @@ public final class FoodChain implements TaskChain, com.dwinovo.numen.task.reflex
      * and {@link #tick} both call this single method, so "priority says there is
      * food" and "tick picks a slot" can never disagree.
      */
-    private static int bestEdibleSlot(NumenPlayer companion) {
+    static boolean hasEdible(NumenPlayer companion) {
+        return bestEdibleSlot(companion) >= 0;
+    }
+
+    static int bestEdibleSlot(NumenPlayer companion) {
         Inventory inv = companion.getInventory();
         int bestRegular = -1;
         int bestRegularNutrition = -1;
