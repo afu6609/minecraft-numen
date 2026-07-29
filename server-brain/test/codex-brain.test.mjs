@@ -6,6 +6,17 @@ import {
   MomoBrain,
 } from "../src/codex-brain.mjs";
 
+function completedChatTurn() {
+  return {
+    items: [{
+      type: "mcp_tool_call",
+      server: "numen",
+      tool: "send_chat",
+      status: "completed",
+    }],
+  };
+}
+
 test("Codex runtimes isolate the classifier and expose only Numen to the agent", () => {
   const constructed = [];
   class FakeCodex {
@@ -527,7 +538,7 @@ test("defense interruption defers player chat until defense finishes", async () 
         turns += 1;
         prompts.push(prompt);
         onTurnStarted?.();
-        if (unblockRecovery) return { items: [] };
+        if (unblockRecovery) return completedChatTurn();
         return await new Promise((resolve, reject) => {
           options.signal.addEventListener(
             "abort",
@@ -593,7 +604,7 @@ test("death keeps one deduplicated deferred goal until the body is available", a
         turns += 1;
         prompts.push(prompt);
         onTurnStarted?.();
-        if (!blockTurns) return { items: [] };
+        if (!blockTurns) return completedChatTurn();
         return await new Promise((resolve, reject) => {
           options.signal.addEventListener(
             "abort",
@@ -655,6 +666,99 @@ test("death keeps one deduplicated deferred goal until the body is available", a
   );
   assert.match(prompts[2], /"body-52-death"/);
   assert.match(prompts[2], /"body-52-available"/);
+});
+
+test("body recovery consumes deferred player goals one per acknowledged turn", async () => {
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        prompts.push(prompt);
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+  brain.pendingPlayerGoals.push(
+    {
+      key: "player_chat:61",
+      event: {
+        id: 61,
+        type: "player_chat",
+        playerName: "Alex",
+        message: "FIRST_DEFERRED_GOAL",
+      },
+      decision: { id: 61, route: "act", reason: "first" },
+    },
+    {
+      key: "player_chat:62",
+      event: {
+        id: 62,
+        type: "player_chat",
+        playerName: "Steve",
+        message: "SECOND_DEFERRED_GOAL",
+      },
+      decision: { id: 62, route: "act", reason: "second" },
+    },
+  );
+
+  assert.deepEqual(
+    await brain.handleBodyEvent({
+      id: "body-multiple-goals",
+      type: "defense_finished",
+    }),
+    { interrupted: false },
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /FIRST_DEFERRED_GOAL/);
+  assert.doesNotMatch(prompts[0], /SECOND_DEFERRED_GOAL/);
+  assert.match(prompts[1], /SECOND_DEFERRED_GOAL/);
+  assert.doesNotMatch(prompts[1], /FIRST_DEFERRED_GOAL/);
+  assert.equal(brain.pendingPlayerGoals.length, 0);
+});
+
+test("unacknowledged deferred player goal remains queued for retry", async () => {
+  let acknowledge = false;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        prompts.push(prompt);
+        return acknowledge ? completedChatTurn() : { items: [] };
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+  brain.pendingPlayerGoals.push({
+    key: "player_chat:63",
+    event: {
+      id: 63,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "RETRY_DEFERRED_GOAL",
+    },
+    decision: { id: 63, route: "act", reason: "retry" },
+  });
+
+  await assert.rejects(
+    brain.handleBodyEvent({
+      id: "body-unacknowledged-goal",
+      type: "defense_finished",
+    }),
+    /without calling send_chat/,
+  );
+  assert.equal(prompts.length, 2);
+  assert.equal(brain.pendingPlayerGoals.length, 1);
+
+  acknowledge = true;
+  assert.deepEqual(await brain.retryBodyContext(), { interrupted: false });
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[2], /RETRY_DEFERRED_GOAL/);
+  assert.match(prompts[2], /"body-unacknowledged-goal"/);
+  assert.equal(brain.pendingPlayerGoals.length, 0);
 });
 
 test("an interrupted task failure is carried into body recovery", async () => {
