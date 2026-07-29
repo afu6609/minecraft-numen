@@ -414,7 +414,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         }
         if (!findScan.isDone()) {
             if (player.level().getGameTime() > findScanDeadline) {
-                findScan.cancel(false);
+                findScan.cancel(true);
                 findScan = null;
                 findScanDrained = true;
             }
@@ -528,6 +528,15 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     @Override
     protected String cancelledMessage() {
         return "cancelled before reaching target";
+    }
+
+    @Override
+    protected void cleanup() {
+        super.cleanup();
+        if (findScan != null) {
+            findScan.cancel(true);
+            findScan = null;
+        }
     }
 
     private String bx(int gy) {

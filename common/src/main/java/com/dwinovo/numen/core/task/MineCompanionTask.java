@@ -72,8 +72,10 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTaskRecord> {
 
-    private static final int RESCAN_INTERVAL = 5;      // ticks between world rescans for targets
+    private static final int RESCAN_INTERVAL = 40;     // two seconds between eligible rescans
     private static final int MAX_ORES = 64;            // cap on tracked target locations
+    /** Refill only after the bounded working set is meaningfully depleted. */
+    private static final int RESCAN_LOW_WATERMARK = MAX_ORES / 2;
     /** 扫描提前收工的同层判据:玩家 Y ±10 内有命中就不再远扫。 */
     private static final int SCAN_Y_THRESHOLD = 10;
     /** 已凑够但全在层外时,最远还愿意扫出去的 chunk 环半径。 */
@@ -102,6 +104,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  takes a moment to spawn, and without this window the body sprints for the next
      *  ore before the item pops and leaves it behind. */
     private static final int DROP_LOITER_TICKS = 5;
+    /** Pickup-goal discovery is cached; it does not need 20 full entity queries/s. */
+    private static final int DROP_SCAN_INTERVAL_TICKS = 10;
+    private static final int DROP_SCAN_RADIUS = 48;
+    private static final int MAX_TRACKED_DROPS = 64;
     /**
      * A failed A* search used to be retried on the very next server tick. One
      * awkward deposit could therefore consume a full search budget 20 times a
@@ -138,6 +144,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private int branchY;
     private int rescanTimer;
     private int branchTicks;
+    private int dropScanTimer;
     private String progressNote = "done";
     /** The ore currently returning {@code NO_SHOT}, and for how many consecutive ticks. */
     private BlockPos noShotPos;
@@ -216,7 +223,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         prune();
         if (--rescanTimer <= 0) {
             rescanTimer = RESCAN_INTERVAL;
-            if (scan == null) kickScan();
+            if (scan == null && knownOres.size() < RESCAN_LOW_WATERMARK) kickScan();
         }
 
         // 0) Continue an in-progress dig, locked onto its block (no re-selection)
@@ -231,7 +238,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             }
         }
 
-        drops = droppedItems();
+        if (--dropScanTimer <= 0) {
+            dropScanTimer = DROP_SCAN_INTERVAL_TICKS;
+            drops = droppedItems();
+        }
 
         // 1) Mine any target we can already reach + see from here (no pathing) —
         //    a tree gets mined from beside, never by digging under it.
@@ -431,20 +441,23 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         Level level = player.level();
         long now = level.getGameTime();
         anticipatedDrops.values().removeIf(expiry -> expiry < now);
-        // 搜集范围 = 服务端视距(身体周围的加载邻域),与目标扫描的事实边界同源。
-        int reach = level instanceof ServerLevel sl
-                ? sl.getServer().getPlayerList().getViewDistance() * 16 : 128;
-        AABB box = new AABB(player.blockPosition()).inflate(reach);
+        int loadedReach = level instanceof ServerLevel sl
+                ? sl.getServer().getPlayerList().getViewDistance() * 16
+                : DROP_SCAN_RADIUS;
+        AABB box = new AABB(player.blockPosition())
+                .inflate(Math.min(loadedReach, DROP_SCAN_RADIUS));
         List<BlockPos> out = new ArrayList<>();
         for (ItemEntity ie : level.getEntitiesOfClass(ItemEntity.class, box)) {
             if (!dropItems.contains(ie.getItem().getItem())) continue;
             BlockPos p = ie.blockPosition();
             if (blacklist.contains(p) || nearKnownOre(p)) continue;
             out.add(p);
+            if (out.size() >= MAX_TRACKED_DROPS) return out;
         }
         for (BlockPos p : anticipatedDrops.keySet()) {
             if (blacklist.contains(p) || nearKnownOre(p)) continue;
             out.add(p);
+            if (out.size() >= MAX_TRACKED_DROPS) break;
         }
         return out;
     }
@@ -615,7 +628,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         if (scan == null) return;
         if (!scan.isDone()) {
             if (player.level().getGameTime() > scanDeadline) {   // wedged — drop it, re-kick later
-                scan.cancel(false);
+                scan.cancel(true);
                 scan = null;
             }
             return;
@@ -634,12 +647,17 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  Every candidate is re-validated here on the main thread, so a slightly
      *  stale async scan result is harmless. */
     private void mergeHits(List<BlockScanner.Hit> hits) {
-        for (BlockScanner.Hit hit : hits) {
+        // Producer-side bounds are mandatory, but this second independent cap
+        // keeps a stale/mismatched scanner implementation from ever turning one
+        // server tick into O(n²) ArrayList.contains work again.
+        Set<BlockPos> seen = new HashSet<>(knownOres);
+        int acceptedInput = Math.min(hits.size(), MAX_ORES);
+        for (int i = 0; i < acceptedInput; i++) {
+            BlockScanner.Hit hit = hits.get(i);
             BlockPos p = hit.pos().immutable();
-            if (blacklist.contains(p) || knownOres.contains(p)) continue;
+            if (blacklist.contains(p) || !seen.add(p)) continue;
             knownOres.add(p);
         }
-        prune();
     }
 
     private void prune() {
@@ -765,7 +783,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         super.cleanup();
         digger.cancel();
         if (scan != null) {
-            scan.cancel(false);
+            scan.cancel(true);
             scan = null;
         }
     }

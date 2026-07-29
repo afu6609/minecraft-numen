@@ -3,6 +3,8 @@ package com.dwinovo.numen.core.scan;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -24,6 +26,28 @@ public final class ScanExecutor {
     private ScanExecutor() {}
 
     public static <T> CompletableFuture<T> submit(Supplier<T> task) {
-        return CompletableFuture.supplyAsync(task, EXEC);
+        AtomicReference<Future<?>> backing = new AtomicReference<>();
+        CompletableFuture<T> result = new CompletableFuture<>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                boolean cancelled = super.cancel(mayInterruptIfRunning);
+                Future<?> submitted = backing.get();
+                if (cancelled && submitted != null) {
+                    submitted.cancel(mayInterruptIfRunning);
+                }
+                return cancelled;
+            }
+        };
+        Future<?> submitted = EXEC.submit(() -> {
+            if (result.isCancelled()) return;
+            try {
+                result.complete(task.get());
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            }
+        });
+        backing.set(submitted);
+        if (result.isCancelled()) submitted.cancel(true);
+        return result;
     }
 }

@@ -12,6 +12,7 @@ import net.minecraft.world.level.chunk.ChunkStatus;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -192,11 +193,11 @@ public final class BlockScanner {
      * {@code max} 个命中,且(超出 {@code maxChunkRadius} 环,或已扫过第 1 环
      * 且有玩家 Y±{@code yLevelThreshold} 内的命中)。目标稀缺时一路扫到
      * 捕获截断处(加载区边缘)。每个 chunk 内 section 按离玩家 Y 最近优先;
-     * 结果无序,调用方自行按距离排序截断。撕裂的调色板读跳过该 chunk。
+     * 结果严格不超过 {@code max},并按距离排序。撕裂的调色板读跳过该 chunk。
      */
     public static List<Hit> scanRings(Level level, RingCapture cap, Set<Block> targets,
                                       int max, int yLevelThreshold, int maxChunkRadius) {
-        if (targets.isEmpty()) return List.of();
+        if (targets.isEmpty() || max <= 0) return List.of();
         Predicate<BlockState> filter = state -> targets.contains(state.getBlock());
         BlockPos center = cap.center();
         int minY = level.getMinBuildHeight();
@@ -206,32 +207,36 @@ public final class BlockScanner {
                 .sorted(Comparator.comparingInt(y -> Math.abs(y - playerSection)))
                 .mapToInt(Integer::intValue).toArray();
         int maxRadiusSq = maxChunkRadius * maxChunkRadius;
-        List<Hit> res = new ArrayList<>();
+        BoundedHits res = new BoundedHits(max);
         boolean foundWithinY = false;
+        outer:
         for (int ringSq = 0; ringSq < cap.rings().size(); ringSq++) {
+            if (Thread.currentThread().isInterrupted()) break;
             for (ChunkAccess chunk : cap.rings().get(ringSq)) {
+                if (Thread.currentThread().isInterrupted()) break outer;
                 try {
                     if (scanWholeChunk(chunk, minY, filter, res,
-                            max, yLevelThreshold, playerY, order, center)) {
+                            yLevelThreshold, playerY, order, center)) {
                         foundWithinY = true;
                     }
-                } catch (Throwable concurrentPaletteRead) {
+                } catch (RuntimeException concurrentPaletteRead) {
                     // 主线程改了这个 chunk 的调色板:本轮跳过。
                 }
+                // A common block such as stone can fill the budget in a fraction
+                // of one section. Once a same-level candidate exists, scanning
+                // more chunks only creates duplicate work and used to return tens
+                // of thousands of hits despite max=64.
+                if (res.full() && foundWithinY) break outer;
             }
-            if (res.size() >= max
-                    && (ringSq > maxRadiusSq || (ringSq > 1 && foundWithinY))) {
-                break;
-            }
+            if (res.full() && ringSq > maxRadiusSq) break;
         }
-        return res;
+        return res.sorted();
     }
 
     /** 扫一个 chunk 的全部 section(近 Y 优先),返回是否有玩家 Y 阈值内的命中。
-     *  凑够 {@code max} 后:同层命中记 foundWithinY;层外命中在本 chunk 已见
-     *  同层命中时直接返回(层外的不再要)。 */
+     *  收集器始终只保留最近的 {@code max} 个；凑够且已有同层命中就立刻返回。 */
     private static boolean scanWholeChunk(ChunkAccess chunk, int minY, Predicate<BlockState> filter,
-                                          List<Hit> res, int max, int yLevelThreshold, int playerY,
+                                          BoundedHits res, int yLevelThreshold, int playerY,
                                           int[] order, BlockPos center) {
         LevelChunkSection[] sections = chunk.getSections();
         int baseX = chunk.getPos().getMinBlockX();
@@ -251,26 +256,67 @@ public final class BlockScanner {
                         BlockState state = states.get(x, yy, z);
                         if (!filter.test(state)) continue;
                         int y = yReal | yy;
-                        if (res.size() >= max) {
-                            if (Math.abs(y - playerY) < yLevelThreshold) {
-                                foundWithinY = true;
-                            } else if (foundWithinY) {
-                                return true;
-                            }
-                        }
                         int wx = baseX | x;
                         int wy = y + minY;
                         int wz = baseZ | z;
                         double dx = wx - center.getX();
                         double dy = wy - center.getY();
                         double dz = wz - center.getZ();
-                        res.add(new Hit(new BlockPos(wx, wy, wz), state,
+                        res.offer(new Hit(
+                                new BlockPos(wx, wy, wz),
+                                state,
                                 Math.sqrt(dx * dx + dy * dy + dz * dz)));
+                        if (Math.abs(y - playerY) < yLevelThreshold) {
+                            foundWithinY = true;
+                        }
                     }
                 }
             }
+            // Finish this section so later traversal-order hits can replace
+            // earlier but farther entries in the bounded nearest-hit heap.
+            if (Thread.currentThread().isInterrupted()) return foundWithinY;
+            if (res.full() && foundWithinY) return true;
         }
         return foundWithinY;
+    }
+
+    /**
+     * Fixed-size nearest-hit collector. A strict producer-side bound matters:
+     * consumers must never receive a landscape-sized list and then discover
+     * that their advertised {@code max} was only an early-stop hint.
+     */
+    static final class BoundedHits {
+        private final int limit;
+        private final PriorityQueue<Hit> farthestFirst;
+
+        BoundedHits(int limit) {
+            if (limit <= 0) throw new IllegalArgumentException("limit must be positive");
+            this.limit = limit;
+            this.farthestFirst = new PriorityQueue<>(
+                    Comparator.comparingDouble(Hit::distance).reversed());
+        }
+
+        void offer(Hit hit) {
+            if (farthestFirst.size() < limit) {
+                farthestFirst.add(hit);
+                return;
+            }
+            Hit farthest = farthestFirst.peek();
+            if (farthest != null && hit.distance() < farthest.distance()) {
+                farthestFirst.poll();
+                farthestFirst.add(hit);
+            }
+        }
+
+        boolean full() {
+            return farthestFirst.size() >= limit;
+        }
+
+        List<Hit> sorted() {
+            List<Hit> out = new ArrayList<>(farthestFirst);
+            out.sort(Comparator.comparingDouble(Hit::distance));
+            return List.copyOf(out);
+        }
     }
 
     /**
