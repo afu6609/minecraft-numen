@@ -256,7 +256,14 @@ export async function run({
             status: event.status,
             result: event.message ?? "",
           });
-          await brain.handleTaskEvent(event);
+          try {
+            await brain.handleTaskEvent(event);
+          } catch (error) {
+            log("error", "background task reconciliation deferred", {
+              eventId: event.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           continue;
         }
         if (
@@ -281,7 +288,34 @@ export async function run({
             companion: event.companionName,
             type: event.type,
           });
-          await brain.handleBodyEvent(event);
+          try {
+            await brain.handleBodyEvent(event);
+          } catch (error) {
+            // MomoBrain re-queues authoritative body/task context before
+            // throwing. A transient model-capacity failure must not kill the
+            // long-lived poller and lose the in-memory recovery context.
+            log("error", "body context re-grounding deferred", {
+              eventId: event.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            if (!once && !stopping) {
+              await delay(5_000);
+              try {
+                await brain.retryBodyContext();
+                log("info", "deferred body context re-grounding recovered", {
+                  eventId: event.id,
+                });
+              } catch (retryError) {
+                log("warn", "deferred body context remains queued", {
+                  eventId: event.id,
+                  error:
+                    retryError instanceof Error
+                      ? retryError.message
+                      : String(retryError),
+                });
+              }
+            }
+          }
           continue;
         }
         if (event.type !== "player_chat") {
@@ -308,7 +342,15 @@ export async function run({
           route: decision.route,
           reason: decision.reason,
         });
-        await brain.handle(event, decision);
+        try {
+          await brain.handle(event, decision);
+        } catch (error) {
+          log("error", "chat handling failed without stopping the poller", {
+            eventId: event.id,
+            player: event.playerName,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     }
   } finally {

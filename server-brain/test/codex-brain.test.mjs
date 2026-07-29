@@ -347,6 +347,36 @@ test("body telemetry is coalesced and re-grounded without forced chat", async ()
   assert.match(prompts[0], /"body-3"/);
 });
 
+test("transient body turn failures stay queued for an in-process retry", async () => {
+  let turns = 0;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        turns += 1;
+        prompts.push(prompt);
+        if (turns === 1) {
+          throw new Error("Selected model is at capacity");
+        }
+        return { items: [] };
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  await assert.rejects(
+    brain.handleBodyEvent({
+      id: "body-capacity",
+      type: "body_available",
+    }),
+    /at capacity/,
+  );
+  assert.deepEqual(await brain.retryBodyContext(), { interrupted: false });
+  assert.equal(turns, 2);
+  assert.match(prompts[1], /"body-capacity"/);
+});
+
 test("direct control interrupts an active Codex turn without a corrective retry", async () => {
   let turns = 0;
   let started;

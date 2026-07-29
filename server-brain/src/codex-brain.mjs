@@ -378,6 +378,20 @@ export class MomoBrain {
 
   async handleBodyEvent(event) {
     this.noteBodyEvent(event);
+    return this.drainBodyContext();
+  }
+
+  async retryBodyContext() {
+    if (
+      this.pendingBodyEvents.length === 0 &&
+      this.pendingTaskEvents.length === 0
+    ) {
+      return { interrupted: false, empty: true };
+    }
+    return this.drainBodyContext();
+  }
+
+  async drainBodyContext() {
     if (this.thread == null) this.thread = this.startThread();
     const events = this.pendingBodyEvents.splice(0);
     const interruptedTasks = this.pendingTaskEvents.splice(0);
