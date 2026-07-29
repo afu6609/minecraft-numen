@@ -143,6 +143,70 @@ class CombatDecisionEngineTest {
     }
 
     @Test
+    void circlingPhantomUsesBowInsteadOfMistakingSideCoverForARoof() {
+        TerrainState sideCoverOnly = new TerrainState(
+                false, true, 4, 2, true, true,
+                false, false, 0, false, false, false);
+
+        CombatDecision decision = decide(healthy(), sideCoverOnly,
+                threat(ThreatType.PHANTOM, 1, 8.0, true, true, AttackPhase.IDLE),
+                EngagementDirective.SURVIVAL_ONLY);
+
+        assertEquals(Action.RANGED_ENGAGE, decision.action());
+        assertFalse(decision.reasons().contains(
+                Reason.OVERHEAD_COVER_COUNTERS_AIR_THREAT));
+    }
+
+    @Test
+    void divingPhantomUsesShieldWhenItIsOutsideCounterRange() {
+        TerrainState sideCoverOnly = new TerrainState(
+                false, true, 4, 2, true, true,
+                false, false, 0, false, false, false);
+
+        CombatDecision decision = decide(healthy(), sideCoverOnly,
+                threat(ThreatType.PHANTOM, 1, 5.0, true, true, AttackPhase.DIVING),
+                EngagementDirective.SURVIVAL_ONLY);
+
+        assertEquals(Action.HOLD_DEFENSIVE_POSITION, decision.action());
+        assertTrue(decision.reasons().contains(Reason.SHIELD_AVAILABLE));
+    }
+
+    @Test
+    void healthyBodyMayCounterStrikeAPhantomInsideActualMeleeReach() {
+        SelfState swordOnly = new SelfState(
+                new Vitals(20, 20, 0, 20, 12, 2),
+                new Loadout(true, 7, RangedWeapon.NONE, 0, false, 6, 1),
+                noEffects());
+
+        CombatDecision decision = decide(swordOnly, openTerrain(),
+                threat(ThreatType.PHANTOM, 1, 2.5, true, true, AttackPhase.DIVING),
+                EngagementDirective.SURVIVAL_ONLY);
+
+        assertEquals(Action.MELEE_ENGAGE, decision.action());
+        assertFalse(hasVeto(
+                decision, VetoScope.MELEE, VetoCode.AIRBORNE_TARGET));
+    }
+
+    @Test
+    void criticalPhantomDefenseNeverTreatsSideCoverAsOverheadCover() {
+        SelfState hurt = new SelfState(
+                new Vitals(5, 20, 0, 18, 12, 2),
+                new Loadout(true, 7, RangedWeapon.BOW, 16, true, 3, 0),
+                noEffects());
+        TerrainState sideCoverOnly = new TerrainState(
+                false, true, 3, 2, true, true,
+                false, false, 0, false, false, false);
+
+        CombatDecision decision = decide(hurt, sideCoverOnly,
+                threat(ThreatType.PHANTOM, 1, 7.0, true, true, AttackPhase.DIVING),
+                EngagementDirective.SURVIVAL_ONLY);
+
+        assertEquals(Action.RETREAT, decision.action());
+        assertFalse(decision.reasons().contains(
+                Reason.HARD_COVER_BREAKS_LINE_OF_SIGHT));
+    }
+
+    @Test
     void singleZombieIsSafeMeleeButCrowdUsesShelter() {
         CombatDecision single = decide(healthy(), openTerrain(),
                 threat(ThreatType.ZOMBIE, 1, 4.0, true, true, AttackPhase.APPROACHING),

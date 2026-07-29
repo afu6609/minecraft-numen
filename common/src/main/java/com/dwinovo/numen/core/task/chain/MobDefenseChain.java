@@ -352,8 +352,27 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
         if (focus instanceof Creeper && now < creeperKiteUntil) {
             return Action.RETREAT;
         }
+        boolean phantom = focus instanceof Phantom;
+        Action serverDecision =
+                lastDecision == null ? requested : lastDecision.action();
+        boolean immediatePhantomDefense = phantom
+                && (serverDecision == Action.MELEE_ENGAGE
+                || serverDecision == Action.HOLD_DEFENSIVE_POSITION);
+        if (immediatePhantomDefense) {
+            committedSafety = null;
+            safetyCommitUntil = 0L;
+            return serverDecision;
+        }
+        if (phantom && requested == Action.SEEK_HARD_COVER) {
+            requested = usableShelter(self)
+                    ? Action.SEEK_TRUSTED_SHELTER : Action.RETREAT;
+        }
+        if (phantom && committedSafety == Action.SEEK_HARD_COVER) {
+            committedSafety = null;
+            safetyCommitUntil = 0L;
+        }
         if (requested == Action.RANGED_ENGAGE && now < rangedBlockedUntil) {
-            requested = terrain.hardCoverTarget() != null
+            requested = !phantom && terrain.hardCoverTarget() != null
                     ? Action.SEEK_HARD_COVER : Action.RETREAT;
         }
 
@@ -373,7 +392,9 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
                 if (committedSafety == Action.SEEK_TRUSTED_SHELTER
                         && !usableShelter(self)) {
                     return commitSafety(
-                            terrain != null && terrain.hardCoverTarget() != null
+                            !phantom
+                                    && terrain != null
+                                    && terrain.hardCoverTarget() != null
                                     ? Action.SEEK_HARD_COVER : Action.RETREAT,
                             now);
                 }
@@ -664,7 +685,12 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
             }
             rangedBlockedUntil =
                     self.level().getGameTime() + FAILED_RANGED_HOLD_TICKS;
-            tickCover(self, threat);
+            if (threat instanceof Phantom) {
+                commitSafety(Action.RETREAT, self.level().getGameTime());
+                tickRetreat(self, cachedContext, threat);
+            } else {
+                tickCover(self, threat);
+            }
         }
     }
 
@@ -860,7 +886,9 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
             shelterBlockedUntil =
                     self.level().getGameTime() + SHELTER_FAILURE_COOLDOWN_TICKS;
         }
-        Action fallback = terrain != null && terrain.hardCoverTarget() != null
+        Action fallback = !(focus instanceof Phantom)
+                && terrain != null
+                && terrain.hardCoverTarget() != null
                 ? Action.SEEK_HARD_COVER : Action.RETREAT;
         commitSafety(fallback, self.level().getGameTime());
         if (fallback == Action.SEEK_HARD_COVER) tickCover(self, focus);

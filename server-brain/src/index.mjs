@@ -155,6 +155,7 @@ export async function run({
             if (event.type === "defense_started" || event.type === "death") {
               const interruptedTurn = brain.interrupt({
                 preserveTaskRecovery: true,
+                preservePlayerGoal: true,
               });
               log(
                 event.type === "death" ? "warn" : "info",

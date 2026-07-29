@@ -35,6 +35,8 @@ public final class CombatDecisionEngine {
     private static final double HEALTHY_MELEE_RATIO = 0.70;
     private static final double VERY_HEALTHY_RATIO = 0.82;
     private static final double CREEPER_BLAST_ABORT_DISTANCE = 7.0;
+    private static final double PHANTOM_COUNTER_DISTANCE = 3.0;
+    private static final double PHANTOM_IMMINENT_DIVE_DISTANCE = 5.0;
 
     private CombatDecisionEngine() {}
 
@@ -193,19 +195,57 @@ public final class CombatDecisionEngine {
             reasons.add(Reason.OVERHEAD_COVER_COUNTERS_AIR_THREAT);
             return Action.HOLD_SAFE_POSITION;
         }
-        if (input.terrain().canReachVerifiedShelter()
-                || input.terrain().hardCoverReachable()) {
-            reasons.add(Reason.OVERHEAD_COVER_COUNTERS_AIR_THREAT);
-            return input.terrain().canReachVerifiedShelter()
-                    ? Action.SEEK_TRUSTED_SHELTER
-                    : Action.SEEK_HARD_COVER;
+
+        boolean imminentDive =
+                threat.phase() == AttackPhase.DIVING
+                        && threat.nearestDistance()
+                        <= PHANTOM_IMMINENT_DIVE_DISTANCE;
+        if (imminentDive) {
+            boolean counterWindow =
+                    threat.nearestDistance() <= PHANTOM_COUNTER_DISTANCE
+                            && input.self().vitals().effectiveHealthRatio()
+                            >= HEALTHY_MELEE_RATIO
+                            && !vetoes.vetoes(Action.MELEE_ENGAGE);
+            if (counterWindow) {
+                reasons.add(Reason.MELEE_WEAPON_AVAILABLE);
+                return Action.MELEE_ENGAGE;
+            }
+            if (input.self().loadout().hasShield()) {
+                reasons.add(Reason.SHIELD_AVAILABLE);
+                return Action.HOLD_DEFENSIVE_POSITION;
+            }
+            if (input.terrain().hasEscapeRoute()) {
+                reasons.add(Reason.ESCAPE_ROUTE_AVAILABLE);
+                return Action.RETREAT;
+            }
+            reasons.add(Reason.NO_SAFE_ESCAPE_ROUTE);
+            return Action.HOLD_DEFENSIVE_POSITION;
         }
-        if (threat.phase() != AttackPhase.DIVING
-                && !vetoes.vetoes(Action.RANGED_ENGAGE)) {
+
+        if (input.terrain().canReachVerifiedShelter()) {
+            reasons.add(Reason.OVERHEAD_COVER_COUNTERS_AIR_THREAT);
+            return Action.SEEK_TRUSTED_SHELTER;
+        }
+
+        if (threat.phase() == AttackPhase.DIVING) {
+            if (input.terrain().hasEscapeRoute()) {
+                reasons.add(Reason.ESCAPE_ROUTE_AVAILABLE);
+                return Action.RETREAT;
+            }
+            reasons.add(Reason.NO_SAFE_ESCAPE_ROUTE);
+            return Action.HOLD_DEFENSIVE_POSITION;
+        }
+
+        if (!vetoes.vetoes(Action.RANGED_ENGAGE)) {
             reasons.add(Reason.RANGED_WEAPON_AVAILABLE);
             return Action.RANGED_ENGAGE;
         }
-        return chooseSafety(input, threat, reasons, false);
+        if (input.terrain().hasEscapeRoute()) {
+            reasons.add(Reason.ESCAPE_ROUTE_AVAILABLE);
+            return Action.RETREAT;
+        }
+        reasons.add(Reason.NO_SAFE_ESCAPE_ROUTE);
+        return Action.HOLD_DEFENSIVE_POSITION;
     }
 
     private static Action decideZombie(
@@ -307,8 +347,8 @@ public final class CombatDecisionEngine {
             LinkedHashSet<Reason> reasons,
             boolean preferShelter) {
         TerrainState terrain = input.terrain();
+        boolean phantom = focus.type() == ThreatType.PHANTOM;
         boolean projectileThreat = focus.type() == ThreatType.SKELETON
-                || focus.type() == ThreatType.PHANTOM
                 || focus.phase() == AttackPhase.RANGED_CHARGE
                 || focus.phase() == AttackPhase.PROJECTILE_RELEASED;
 
@@ -316,7 +356,7 @@ public final class CombatDecisionEngine {
             reasons.add(Reason.VERIFIED_SHELTER_AVAILABLE);
             return Action.SEEK_TRUSTED_SHELTER;
         }
-        if (projectileThreat && terrain.hardCoverReachable()) {
+        if (!phantom && projectileThreat && terrain.hardCoverReachable()) {
             reasons.add(Reason.HARD_COVER_BREAKS_LINE_OF_SIGHT);
             return Action.SEEK_HARD_COVER;
         }
@@ -329,7 +369,7 @@ public final class CombatDecisionEngine {
             reasons.add(Reason.VERIFIED_SHELTER_AVAILABLE);
             return Action.SEEK_TRUSTED_SHELTER;
         }
-        if (terrain.hardCoverReachable()) {
+        if (!phantom && terrain.hardCoverReachable()) {
             reasons.add(Reason.HARD_COVER_BREAKS_LINE_OF_SIGHT);
             return Action.SEEK_HARD_COVER;
         }
@@ -344,12 +384,18 @@ public final class CombatDecisionEngine {
         EnumSetBuilder result = new EnumSetBuilder();
         Loadout loadout = input.self().loadout();
         StatusEffects effects = input.self().effects();
+        boolean phantomCounterWindow =
+                focus.type() == ThreatType.PHANTOM
+                        && focus.phase() == AttackPhase.DIVING
+                        && focus.nearestDistance() <= PHANTOM_COUNTER_DISTANCE
+                        && input.self().vitals().effectiveHealthRatio()
+                        >= HEALTHY_MELEE_RATIO;
 
         if (focus.type() == ThreatType.PLAYER) {
             result.add(VetoScope.ANY_ENGAGEMENT, VetoCode.PROTECTED_TARGET);
         }
         if (focus.type() == ThreatType.IRON_GOLEM
-                || focus.airborne()
+                || (focus.airborne() && !phantomCounterWindow)
                 || focus.primaryAttackDamage() >= 10.0) {
             result.add(VetoScope.MELEE, VetoCode.HEAVY_MELEE_TARGET);
         }
@@ -381,7 +427,8 @@ public final class CombatDecisionEngine {
                 && (focus.type() == ThreatType.CREEPER || totalThreats >= 2)) {
             result.add(VetoScope.MELEE, VetoCode.NO_MELEE_ESCAPE_ROUTE);
         }
-        if (focus.type() == ThreatType.PHANTOM || focus.airborne()) {
+        if ((focus.type() == ThreatType.PHANTOM && !phantomCounterWindow)
+                || (focus.type() != ThreatType.PHANTOM && focus.airborne())) {
             result.add(VetoScope.MELEE, VetoCode.AIRBORNE_TARGET);
         }
         return result;
@@ -449,7 +496,8 @@ public final class CombatDecisionEngine {
         if (input.terrain().canReachVerifiedShelter()) {
             reasons.add(Reason.VERIFIED_SHELTER_AVAILABLE);
         }
-        if (input.terrain().hardCoverReachable()) {
+        if (focus.type() != ThreatType.PHANTOM
+                && input.terrain().hardCoverReachable()) {
             reasons.add(Reason.HARD_COVER_BREAKS_LINE_OF_SIGHT);
         }
         if (input.terrain().hasEscapeRoute()) {

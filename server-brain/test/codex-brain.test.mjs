@@ -516,6 +516,147 @@ test("direct control interrupts an active Codex turn without a corrective retry"
   assert.equal(turns, 1);
 });
 
+test("defense interruption defers player chat until defense finishes", async () => {
+  let turns = 0;
+  let unblockRecovery = false;
+  let onTurnStarted = null;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt, options) {
+        turns += 1;
+        prompts.push(prompt);
+        onTurnStarted?.();
+        if (unblockRecovery) return { items: [] };
+        return await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            { once: true },
+          );
+        });
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  let started;
+  const entered = new Promise((resolve) => {
+    started = resolve;
+  });
+  onTurnStarted = started;
+  const handling = brain.handle(
+    {
+      id: 51,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex-uuid",
+      message: "DEFENSE_DEFERRED_GO_HOME",
+    },
+    { id: 51, route: "act", reason: "go home" },
+  );
+  await entered;
+  brain.interrupt({
+    preserveTaskRecovery: true,
+    preservePlayerGoal: true,
+  });
+  assert.deepEqual(await handling, { interrupted: true });
+
+  brain.noteBodyEvent({
+    id: "body-51-start",
+    type: "defense_started",
+  });
+  unblockRecovery = true;
+  onTurnStarted = null;
+  await brain.handleBodyEvent({
+    id: "body-51-finished",
+    type: "defense_finished",
+  });
+
+  assert.equal(turns, 2);
+  assert.match(prompts[1], /DEFENSE_DEFERRED_GO_HOME/);
+  assert.match(prompts[1], /"body-51-start"/);
+  assert.match(prompts[1], /"body-51-finished"/);
+  assert.match(prompts[1], /get_self_status and task_status/);
+  assert.match(prompts[1], /do not submit a duplicate/);
+});
+
+test("death keeps one deduplicated deferred goal until the body is available", async () => {
+  let turns = 0;
+  let blockTurns = true;
+  let onTurnStarted = null;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt, options) {
+        turns += 1;
+        prompts.push(prompt);
+        onTurnStarted?.();
+        if (!blockTurns) return { items: [] };
+        return await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("aborted")),
+            { once: true },
+          );
+        });
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+  const event = {
+    id: 52,
+    type: "player_chat",
+    playerName: "Alex",
+    playerUuid: "alex-uuid",
+    message: "DEATH_DEFERRED_GO_HOME_ONCE",
+  };
+  const decision = { id: 52, route: "act", reason: "go home" };
+
+  async function interruptSameChat() {
+    let started;
+    const entered = new Promise((resolve) => {
+      started = resolve;
+    });
+    onTurnStarted = started;
+    const handling = brain.handle(event, decision);
+    await entered;
+    brain.interrupt({
+      preserveTaskRecovery: true,
+      preservePlayerGoal: true,
+    });
+    assert.deepEqual(await handling, { interrupted: true });
+  }
+
+  await interruptSameChat();
+  await interruptSameChat();
+  brain.noteBodyEvent({
+    id: "body-52-death",
+    type: "death",
+  });
+
+  // A death event is buffered only; unavailable-body telemetry must not spin
+  // up immediate model retries.
+  assert.equal(turns, 2);
+
+  blockTurns = false;
+  onTurnStarted = null;
+  await brain.handleBodyEvent({
+    id: "body-52-available",
+    type: "body_available",
+  });
+
+  assert.equal(turns, 3);
+  assert.equal(
+    prompts[2].match(/DEATH_DEFERRED_GO_HOME_ONCE/g)?.length,
+    1,
+  );
+  assert.match(prompts[2], /"body-52-death"/);
+  assert.match(prompts[2], /"body-52-available"/);
+});
+
 test("an interrupted task failure is carried into body recovery", async () => {
   let turns = 0;
   let started;

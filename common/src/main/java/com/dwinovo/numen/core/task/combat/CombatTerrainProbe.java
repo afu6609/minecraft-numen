@@ -3,6 +3,7 @@ package com.dwinovo.numen.core.task.combat;
 import com.dwinovo.numen.core.task.combat.CombatDecisionInput.TerrainState;
 import com.dwinovo.numen.entity.NumenPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.RangedAttackMob;
@@ -82,7 +83,7 @@ public final class CombatTerrainProbe {
             coverThreats = List.of(primary);
         }
         BlockPos cover = findHardCover(self, coverThreats);
-        boolean overhead = hasCollision(level, origin.above(2));
+        boolean overhead = hasProtectiveRoof(level, origin);
         int passableNeighbours = passableNeighbourCount(level, origin);
         boolean choke = passableNeighbours >= 1 && passableNeighbours <= 2;
         double coverDistance = cover == null
@@ -255,9 +256,28 @@ public final class CombatTerrainProbe {
                 && !isHazard(floorState);
     }
 
-    private static boolean hasCollision(Level level, BlockPos pos) {
-        return level.hasChunkAt(pos)
-                && !level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
+    /**
+     * A single branch, fence, or isolated block is not reliable phantom cover.
+     * Require a continuous 3x3 downward-sturdy roof at a normal interior
+     * ceiling height so HOLD_SAFE_POSITION cannot latch onto incidental scenery.
+     */
+    private static boolean hasProtectiveRoof(Level level, BlockPos feet) {
+        for (int dy = 2; dy <= 4; dy++) {
+            boolean continuous = true;
+            for (int dx = -1; dx <= 1 && continuous; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos roof = feet.offset(dx, dy, dz);
+                    if (!level.hasChunkAt(roof)
+                            || !level.getBlockState(roof)
+                                    .isFaceSturdy(level, roof, Direction.DOWN)) {
+                        continuous = false;
+                        break;
+                    }
+                }
+            }
+            if (continuous) return true;
+        }
+        return false;
     }
 
     private static boolean isHazard(BlockState state) {
