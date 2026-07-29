@@ -167,6 +167,8 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanBlocksTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ObserveVolumeTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.SurveySceneTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectObjectTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockStorageTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetWorldInfoTool());

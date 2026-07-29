@@ -16,6 +16,8 @@ const required = [
   "structure_execute",
   "structure_patch",
   "placement_feasibility",
+  "survey_scene",
+  "inspect_object",
 ];
 
 function client(names) {
@@ -41,6 +43,14 @@ test("MCP verification requires the blueprint recovery tools", async () => {
       client(required.filter((name) => name !== "placement_feasibility")),
     ),
     /missing placement_feasibility/,
+  );
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "survey_scene"))),
+    /missing survey_scene/,
+  );
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "inspect_object"))),
+    /missing inspect_object/,
   );
   await verifyMcp(client(required));
 });

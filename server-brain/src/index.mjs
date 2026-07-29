@@ -55,6 +55,8 @@ export async function verifyMcp(client) {
     "structure_execute",
     "structure_patch",
     "placement_feasibility",
+    "survey_scene",
+    "inspect_object",
   ]) {
     if (!names.has(required)) {
       throw new Error(

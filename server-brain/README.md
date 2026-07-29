@@ -80,6 +80,10 @@ to selecting one opaque task macro.
 
 The low-level surface includes:
 
+- `survey_scene` for a compact server-derived scene graph with stable ids for
+  trees, building candidates, entrances, pits/depressions, and ground rises;
+- `inspect_object` for the chosen object's compact exact geometry, current
+  material histogram, relations, provenance confidence, and protection policy;
 - `observe_volume` for a precise, bounded 3D block snapshot;
 - `break_block` for one visible cell guarded by its freshly observed block id;
 - `build` for an explicit list of placements or `minecraft:air` removals;
@@ -96,6 +100,12 @@ The low-level surface includes:
 `mine` remains a resource-gathering macro and has no coordinate boundary. The
 agent is explicitly forbidden from using it to demolish or edit structures.
 Unfamiliar destructive edits run in small verified checkpoints.
+
+The planner now uses semantic perception in layers: `survey_scene` finds and
+names bounded objects, `inspect_object` expands only the selected id, and
+`observe_volume` is reserved for exact cavities or block states. Old chunks do
+not contain a trustworthy per-block creator ledger, so likely player-made
+structures are explicitly marked as an inference and protected by default.
 
 Larger construction goals use a persisted workflow:
 
