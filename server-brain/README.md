@@ -131,6 +131,16 @@ successful structure patch refreshes the budget. Body-defense interruptions
 retain unfinished task context for `defense_finished` or `body_available`;
 an explicit player stop discards that pending recovery.
 
+Combat is split into two latency layers. The server-side survival director
+observes authoritative entity state and makes immediate fight/retreat,
+shield/cover, equipment, and certified-shelter decisions from health,
+absorption, hunger, armor, inventory capabilities, effects, threat count and
+local terrain. The Codex sidecar may inspect a bounded historical trace with
+`get_combat_trace` and save an exact entity/adapter/schema-bound declarative
+policy. Policies contain only bounded combat verbs; every tick still passes the
+server supervisor. Candidates are capped, require three server-confirmed
+successes to become trusted, and automatically deactivate on failure.
+
 The manifest is stored in the Minecraft world's `data` directory, so the plan
 can be resumed after a sidecar or server restart. Demolition reuses exact saved
 coordinates and skips cells whose block no longer matches the blueprint. It
@@ -143,8 +153,9 @@ aborts the current SDK turn, cancels stale queued action chat, and calls
 
 At startup the sidecar verifies that the server exposes the complete workflow
 surface: `structure_plan`, `structure_status`, `structure_execute`,
-`structure_patch`, and `placement_feasibility`. A mismatched old mod therefore
-fails visibly instead of starting with a recovery path it cannot execute.
+`structure_patch`, and `placement_feasibility`, plus combat observation and
+policy tools. A mismatched old mod therefore fails visibly instead of starting
+with a recovery path it cannot execute.
 
 ## Experience policy
 

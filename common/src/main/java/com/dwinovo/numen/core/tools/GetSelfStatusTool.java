@@ -57,8 +57,13 @@ public final class GetSelfStatusTool implements NumenTool {
         root.addProperty("game_mode", self.gameMode.getGameModeForPlayer().getName());
         root.addProperty("hp", self.getHealth());
         root.addProperty("max_hp", self.getMaxHealth());
+        root.addProperty("absorption", self.getAbsorptionAmount());
         root.addProperty("hunger", self.getFoodData().getFoodLevel());
         root.addProperty("saturation", self.getFoodData().getSaturationLevel());
+        root.addProperty("armor", self.getArmorValue());
+        root.addProperty("armor_toughness",
+                self.getAttributeValue(
+                        net.minecraft.world.entity.ai.attributes.Attributes.ARMOR_TOUGHNESS));
 
         JsonObject pos = new JsonObject();
         pos.addProperty("x", self.getX());
@@ -87,9 +92,27 @@ public final class GetSelfStatusTool implements NumenTool {
             JsonObject o = new JsonObject();
             o.addProperty("item", BuiltInRegistries.ITEM.getKey(s.getItem()).toString());
             if (s.getCount() > 1) o.addProperty("count", s.getCount());
+            if (s.isDamageableItem()) {
+                o.addProperty("durability", s.getMaxDamage() - s.getDamageValue());
+                o.addProperty("max_durability", s.getMaxDamage());
+            }
             equipment.add(slot.getName(), o);
         }
         root.add("equipment", equipment);
+
+        JsonArray effects = new JsonArray();
+        for (var effect : self.getActiveEffects()) {
+            JsonObject o = new JsonObject();
+            o.addProperty(
+                    "effect",
+                    BuiltInRegistries.MOB_EFFECT
+                            .getKey(effect.getEffect())
+                            .toString());
+            o.addProperty("level", effect.getAmplifier() + 1);
+            o.addProperty("duration_ticks", effect.getDuration());
+            effects.add(o);
+        }
+        root.add("effects", effects);
 
         var inv = self.getInventory();
         JsonArray items = new JsonArray();
@@ -102,6 +125,10 @@ public final class GetSelfStatusTool implements NumenTool {
             o.addProperty("slot", i);
             o.addProperty("item", BuiltInRegistries.ITEM.getKey(s.getItem()).toString());
             o.addProperty("count", s.getCount());
+            if (s.isDamageableItem()) {
+                o.addProperty("durability", s.getMaxDamage() - s.getDamageValue());
+                o.addProperty("max_durability", s.getMaxDamage());
+            }
             items.add(o);
         }
         JsonObject inventory = new JsonObject();

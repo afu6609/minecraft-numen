@@ -1,6 +1,8 @@
 plugins {
     id 'multiloader-loader'
-    id 'fabric-loom'
+    // 1.20.1 uses official Mojang mappings and Java 17, so keep the compatible
+    // plain Loom line here where it is resolved only when Fabric is included.
+    id 'fabric-loom' version '1.6-SNAPSHOT'
 }
 
 dependencies {

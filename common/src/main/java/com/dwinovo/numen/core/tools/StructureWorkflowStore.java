@@ -2,6 +2,7 @@ package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.agent.tool.ToolArgs;
 import com.dwinovo.numen.core.task.BuildTaskRecord;
+import com.dwinovo.numen.core.task.MultiBlockPlacement;
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -37,6 +38,7 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Small world-local store for model-authored structure blueprints.
@@ -51,6 +53,8 @@ final class StructureWorkflowStore {
     private static final String FILE_NAME = "numen-structure-workflows.json";
     private static final int FILE_VERSION = 1;
     private static final int MAX_WORKFLOWS = 128;
+    private static final int MAX_DIMENSION_CLAIM_CELLS =
+            StructurePlanTool.MAX_CELLS * 2;
     private static final Map<MinecraftServer, StoreData> CACHE = new WeakHashMap<>();
 
     private StructureWorkflowStore() {}
@@ -68,6 +72,7 @@ final class StructureWorkflowStore {
                 throw new IllegalArgumentException(
                         "unknown structure workflow " + requestedId + " for this companion");
             }
+            requireMatchingDimension(self, previous);
         } else if (data.workflows.size() >= MAX_WORKFLOWS) {
             throw new IllegalStateException(
                     "structure workflow store is full; keep or remove old manifests before creating another");
@@ -88,6 +93,7 @@ final class StructureWorkflowStore {
         workflow.id = id;
         workflow.ownerUuid = ownerUuid;
         workflow.ownerName = self.getScoreboardName();
+        workflow.dimensionId = self.level().dimension().location().toString();
         workflow.name = clean(name, "name", 80);
         workflow.goal = clean(goal, "goal", 600);
         workflow.allowReplace = allowReplace;
@@ -124,6 +130,7 @@ final class StructureWorkflowStore {
             throw new IllegalArgumentException(
                     "unknown structure workflow " + requestedId + " for this companion");
         }
+        requireMatchingDimension(self, previous);
 
         Workflow workflow = patchedCopy(
                 previous,
@@ -132,6 +139,12 @@ final class StructureWorkflowStore {
                 removals,
                 pos -> self.level().getBlockState(pos),
                 targets -> StructurePlanTool.validateBounds(self, targets));
+        if (workflow.dimensionId == null || workflow.dimensionId.isBlank()) {
+            // An explicit, bounds-validated patch in the loaded current world is
+            // sufficient evidence to migrate a legacy dimensionless manifest.
+            workflow.dimensionId =
+                    self.level().dimension().location().toString();
+        }
 
         StoreData replacement = replacing(data, previous, workflow);
         save(server, replacement);
@@ -149,17 +162,258 @@ final class StructureWorkflowStore {
                 throw new IllegalArgumentException(
                         "unknown structure workflow " + requestedId + " for this companion");
             }
+            requireMatchingDimension(self, workflow);
             return workflow;
         }
-        return data.workflows.stream()
+        String currentDimension =
+                self.level().dimension().location().toString();
+        Workflow latest = data.workflows.stream()
                 .filter(workflow -> ownerUuid.equals(workflow.ownerUuid))
+                .filter(workflow -> workflow.dimensionId == null
+                        || workflow.dimensionId.isBlank()
+                        || workflow.dimensionId.equals(currentDimension))
                 .max(Comparator.comparingLong(workflow -> workflow.updatedAt))
                 .orElseThrow(() -> new IllegalArgumentException(
-                        "this companion has no saved structure workflow yet"));
+                        "this companion has no saved structure workflow in "
+                                + currentDimension));
+        requireMatchingDimension(self, latest);
+        return latest;
+    }
+
+    /**
+     * Read-only caller seam: all workflows owned by this companion, newest
+     * first. Package consumers must copy while holding the store monitor.
+     */
+    static synchronized List<Workflow> owned(NumenPlayer self) {
+        StoreData data = data(requireServer(self));
+        String ownerUuid = self.getUUID().toString();
+        return data.workflows.stream()
+                .filter(workflow -> ownerUuid.equals(workflow.ownerUuid))
+                .sorted(Comparator.comparingLong(
+                        (Workflow workflow) -> workflow.updatedAt).reversed())
+                .toList();
+    }
+
+    /**
+     * Newest companion-owned workflows eligible for current-dimension
+     * discovery. Known workflows from other dimensions are filtered before the
+     * result cap; only a separately capped number of legacy dimensionless
+     * workflows are included for exact-match migration.
+     */
+    static synchronized List<Workflow> owned(
+            NumenPlayer self, int limit, int legacyLimit) {
+        if (limit < 1 || limit > MAX_WORKFLOWS) {
+            throw new IllegalArgumentException(
+                    "owned workflow limit must be in [1," + MAX_WORKFLOWS + "]");
+        }
+        if (legacyLimit < 0 || legacyLimit > limit) {
+            throw new IllegalArgumentException(
+                    "legacy workflow limit must be in [0,limit]");
+        }
+        StoreData data = data(requireServer(self));
+        String ownerUuid = self.getUUID().toString();
+        String currentDimension =
+                self.level().dimension().location().toString();
+        List<Workflow> sorted = data.workflows.stream()
+                .filter(workflow -> ownerUuid.equals(workflow.ownerUuid))
+                .sorted(Comparator.comparingLong(
+                        (Workflow workflow) -> workflow.updatedAt).reversed())
+                .toList();
+        List<Workflow> result = new ArrayList<>(limit);
+        int legacy = 0;
+        for (Workflow workflow : sorted) {
+            boolean dimensionless = workflow.dimensionId == null
+                    || workflow.dimensionId.isBlank();
+            if (dimensionless) {
+                if (legacy >= legacyLimit) {
+                    continue;
+                }
+                legacy++;
+            } else if (!currentDimension.equals(workflow.dimensionId)) {
+                continue;
+            }
+            result.add(workflow);
+            if (result.size() >= limit) {
+                break;
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * Claim the current dimension for a legacy dimensionless workflow only
+     * after every desired atomic-footprint cell is loaded and exactly matches
+     * the live current world.
+     *
+     * <p>The saved object is not mutated before the replacement file has been
+     * atomically written. A failed match or failed save therefore leaves both
+     * the cache and persistent manifest unchanged.</p>
+     */
+    static synchronized DimensionClaim claimDimensionIfExact(
+            NumenPlayer self, String requestedId) {
+        MinecraftServer server = requireServer(self);
+        if (!server.isSameThread()) {
+            throw new IllegalStateException(
+                    "dimension claims must run on the server thread");
+        }
+        StoreData data = data(server);
+        String exactId = requireExactId(requestedId);
+        Workflow previous =
+                findOwned(data, self.getUUID().toString(), exactId);
+        if (previous == null) {
+            throw new IllegalArgumentException(
+                    "unknown structure workflow " + exactId
+                            + " for this companion");
+        }
+        String currentDimension =
+                self.level().dimension().location().toString();
+        if (previous.dimensionId != null
+                && !previous.dimensionId.isBlank()) {
+            if (previous.dimensionId.equals(currentDimension)) {
+                return new DimensionClaim(
+                        DimensionClaimStatus.ALREADY_CURRENT,
+                        previous,
+                        0,
+                        null,
+                        "workflow already belongs to " + currentDimension);
+            }
+            return new DimensionClaim(
+                    DimensionClaimStatus.WRONG_DIMENSION,
+                    null,
+                    0,
+                    null,
+                    "workflow belongs to " + previous.dimensionId);
+        }
+
+        ExactMatchCheck check = checkExact(
+                previous,
+                pos -> self.level().hasChunkAt(pos),
+                pos -> self.level().getBlockState(pos));
+        if (check.status != ExactMatchStatus.EXACT) {
+            return new DimensionClaim(
+                    switch (check.status) {
+                        case UNLOADED -> DimensionClaimStatus.UNLOADED;
+                        case MISMATCH -> DimensionClaimStatus.MISMATCH;
+                        case LIMIT_EXCEEDED ->
+                                DimensionClaimStatus.LIMIT_EXCEEDED;
+                        case INVALID -> DimensionClaimStatus.INVALID;
+                        case EXACT -> throw new IllegalStateException(
+                                "exact claim check was unexpectedly exact");
+                    },
+                    null,
+                    check.verifiedCells,
+                    check.problem,
+                    check.detail);
+        }
+
+        Workflow claimed = copyMetadata(previous);
+        claimed.dimensionId = currentDimension;
+        claimed.cells = previous.cells.stream()
+                .map(StructureWorkflowStore::copyCell)
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        StoreData replacement = replacing(data, previous, claimed);
+        save(server, replacement);
+        CACHE.put(server, replacement);
+        return new DimensionClaim(
+                DimensionClaimStatus.CLAIMED,
+                claimed,
+                check.verifiedCells,
+                null,
+                "claimed " + currentDimension + " after exact live match");
+    }
+
+    /**
+     * Pure bounded exact-match core kept package-visible for headless tests.
+     */
+    static ExactMatchCheck checkExact(
+            Workflow workflow,
+            Predicate<BlockPos> loaded,
+            Function<BlockPos, BlockState> stateReader) {
+        if (workflow == null || loaded == null || stateReader == null) {
+            throw new IllegalArgumentException(
+                    "workflow, loaded test and state reader are required");
+        }
+        if (workflow.cells == null || workflow.cells.isEmpty()) {
+            return new ExactMatchCheck(
+                    ExactMatchStatus.INVALID, 0, null,
+                    "workflow has no cells");
+        }
+        if (workflow.cells.size() > StructurePlanTool.MAX_CELLS) {
+            return new ExactMatchCheck(
+                    ExactMatchStatus.LIMIT_EXCEEDED, 0, null,
+                    "workflow exceeds " + StructurePlanTool.MAX_CELLS
+                            + " source cells");
+        }
+
+        Map<BlockPos, BlockState> expected = new LinkedHashMap<>();
+        try {
+            for (Cell cell : workflow.cells) {
+                if (cell == null || cell.desired == null) {
+                    return new ExactMatchCheck(
+                            ExactMatchStatus.INVALID, 0, null,
+                            "workflow contains an invalid cell");
+                }
+                BlockState desired = cell.desired.toState();
+                List<MultiBlockPlacement.Cell> footprint =
+                        MultiBlockPlacement.footprint(cell.pos(), desired);
+                if ((long) expected.size() + footprint.size()
+                        > MAX_DIMENSION_CLAIM_CELLS) {
+                    return new ExactMatchCheck(
+                            ExactMatchStatus.LIMIT_EXCEEDED, 0, null,
+                            "expanded workflow exceeds "
+                                    + MAX_DIMENSION_CLAIM_CELLS + " cells");
+                }
+                for (MultiBlockPlacement.Cell part : footprint) {
+                    BlockPos pos = part.pos().immutable();
+                    BlockState duplicate =
+                            expected.putIfAbsent(pos, part.state());
+                    if (duplicate != null
+                            && !duplicate.equals(part.state())) {
+                        return new ExactMatchCheck(
+                                ExactMatchStatus.INVALID, 0, pos,
+                                "atomic footprints conflict at "
+                                        + pos.toShortString());
+                    }
+                }
+            }
+        } catch (RuntimeException error) {
+            return new ExactMatchCheck(
+                    ExactMatchStatus.INVALID, 0, null,
+                    "could not decode workflow state: " + error.getMessage());
+        }
+
+        int verified = 0;
+        for (Map.Entry<BlockPos, BlockState> entry : expected.entrySet()) {
+            BlockPos pos = entry.getKey();
+            if (!loaded.test(pos)) {
+                return new ExactMatchCheck(
+                        ExactMatchStatus.UNLOADED, verified, pos,
+                        "workflow cell is unloaded at " + pos.toShortString());
+            }
+            BlockState actual = stateReader.apply(pos);
+            if (actual == null || !actual.equals(entry.getValue())) {
+                return new ExactMatchCheck(
+                        ExactMatchStatus.MISMATCH, verified, pos,
+                        "live state does not exactly match at "
+                                + pos.toShortString());
+            }
+            verified++;
+        }
+        return new ExactMatchCheck(
+                ExactMatchStatus.EXACT, verified, null,
+                "all " + verified + " expanded cells match");
     }
 
     static synchronized void touch(NumenPlayer self, Workflow workflow, String operation) {
         MinecraftServer server = requireServer(self);
+        String currentDimension = self.level().dimension().location().toString();
+        if (workflow.dimensionId != null
+                && !workflow.dimensionId.isBlank()
+                && !workflow.dimensionId.equals(currentDimension)) {
+            throw new IllegalArgumentException(
+                    "structure workflow belongs to dimension "
+                            + workflow.dimensionId + ", not " + currentDimension);
+        }
         workflow.updatedAt = System.currentTimeMillis();
         workflow.lastOperation = operation;
         save(server, data(server));
@@ -430,6 +684,7 @@ final class StructureWorkflowStore {
         copy.id = source.id;
         copy.ownerUuid = source.ownerUuid;
         copy.ownerName = source.ownerName;
+        copy.dimensionId = source.dimensionId;
         copy.name = source.name;
         copy.goal = source.goal;
         copy.allowReplace = source.allowReplace;
@@ -487,6 +742,19 @@ final class StructureWorkflowStore {
             throw new IllegalStateException("structure workflows require a running server");
         }
         return server;
+    }
+
+    private static void requireMatchingDimension(
+            NumenPlayer self, Workflow workflow) {
+        if (workflow.dimensionId == null || workflow.dimensionId.isBlank()) {
+            return;
+        }
+        String current = self.level().dimension().location().toString();
+        if (!workflow.dimensionId.equals(current)) {
+            throw new IllegalArgumentException(
+                    "structure workflow belongs to dimension "
+                            + workflow.dimensionId + ", not " + current);
+        }
     }
 
     private static StoreData data(MinecraftServer server) {
@@ -552,6 +820,7 @@ final class StructureWorkflowStore {
         String id;
         String ownerUuid;
         String ownerName;
+        String dimensionId;
         String name;
         String goal;
         boolean allowReplace;
@@ -561,6 +830,37 @@ final class StructureWorkflowStore {
         String lastOperation;
         List<Cell> cells = new ArrayList<>();
     }
+
+    enum DimensionClaimStatus {
+        CLAIMED,
+        ALREADY_CURRENT,
+        WRONG_DIMENSION,
+        UNLOADED,
+        MISMATCH,
+        LIMIT_EXCEEDED,
+        INVALID
+    }
+
+    record DimensionClaim(
+            DimensionClaimStatus status,
+            Workflow workflow,
+            int verifiedCells,
+            BlockPos problem,
+            String detail) {}
+
+    enum ExactMatchStatus {
+        EXACT,
+        UNLOADED,
+        MISMATCH,
+        LIMIT_EXCEEDED,
+        INVALID
+    }
+
+    record ExactMatchCheck(
+            ExactMatchStatus status,
+            int verifiedCells,
+            BlockPos problem,
+            String detail) {}
 
     static final class Cell {
         int x;

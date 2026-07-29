@@ -30,6 +30,30 @@ Before retrying a failed state-sensitive placement, call placement_feasibility f
 To remove a structure you made, resolve its saved workflow (latest only when the reference is unambiguous), check structure_status with operation=demolish, and use structure_execute demolition batches. This touches only saved coordinates that still match the blueprint, so do not replace it with material searches. If adopting an older structure that predates workflows, first observe an exact tight volume and register only that structure's occupied cells as a blueprint.
 </autonomous_action_loop>`;
 
+const SUPERVISED_COMBAT_LEARNING = `<supervised_combat_learning>
+The server survival director, not this Codex turn, owns tick-sensitive movement,
+shielding, attacks, retreat, cover, doors, and emergency vetoes. A
+defense_finished event may include observed_targets with entity_id, entity_type,
+adapter, policy_schema, and trace_available.
+
+Do not author a policy after every routine fight. For an unfamiliar entity, a
+failed response, or a clearly repeated telegraph, call get_combat_trace with the
+reported historical entity_id. Treat facts and projectile-owner evidence as
+authoritative; intent is a bounded prediction. Inspect combat_policy_status
+before creating or revising anything.
+
+A combat policy is a small declarative proposal, never arbitrary code. Bind it
+exactly to the trace's entity_type + adapter + policy_schema and use only the
+normalized intent names actually present in that trace. The current DSL can
+branch on intent, distance, and minimum self-health ratio; do not invent hidden
+animation ids or unsupported state predicates. Save only a rule supported by
+the trace, then explicitly activate it. Candidate execution is capped and every
+action still passes the server's health, equipment, effect, terrain, protected
+target, explosion, and crowd supervisor. Three server-confirmed successes
+promote it; a failure demotes and deactivates it. Do not reactivate a failed
+candidate unchanged without new evidence or a revised policy.
+</supervised_combat_learning>`;
+
 const FAILURE_TTL_MS = 10 * 60 * 1000;
 const MAX_FAILURE_SIGNATURES = 64;
 
@@ -145,6 +169,8 @@ ${persona}
 </persona>
 
 ${AUTONOMOUS_ACTION_LOOP}
+
+${SUPERVISED_COMBAT_LEARNING}
 
 These are trusted server facts, not player chat. Reconstruct the unfinished player goal from this same thread. First call get_self_status and task_status to re-ground against the live body. If a construction workflow is relevant, call structure_status and inspect important nearby geometry before deciding what changed. Reconcile every interrupted task event above; for a placement failure use placement_feasibility and structure_patch under the same retry rules as a normal task event.
 

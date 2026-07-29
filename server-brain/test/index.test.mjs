@@ -18,6 +18,12 @@ const required = [
   "placement_feasibility",
   "survey_scene",
   "inspect_object",
+  "observe_entity_intent",
+  "get_combat_trace",
+  "save_combat_policy",
+  "combat_policy_status",
+  "activate_combat_policy",
+  "abort_combat_policy",
 ];
 
 function client(names) {
@@ -29,7 +35,7 @@ function client(names) {
   };
 }
 
-test("MCP verification requires the blueprint recovery tools", async () => {
+test("MCP verification requires blueprint recovery and supervised combat tools", async () => {
   await assert.rejects(
     verifyMcp(client(required.filter((name) => name !== "structure_status"))),
     /missing structure_status/,
@@ -51,6 +57,14 @@ test("MCP verification requires the blueprint recovery tools", async () => {
   await assert.rejects(
     verifyMcp(client(required.filter((name) => name !== "inspect_object"))),
     /missing inspect_object/,
+  );
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "get_combat_trace"))),
+    /missing get_combat_trace/,
+  );
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "save_combat_policy"))),
+    /missing save_combat_policy/,
   );
   await verifyMcp(client(required));
 });

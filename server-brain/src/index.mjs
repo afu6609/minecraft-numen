@@ -57,6 +57,12 @@ export async function verifyMcp(client) {
     "placement_feasibility",
     "survey_scene",
     "inspect_object",
+    "observe_entity_intent",
+    "get_combat_trace",
+    "save_combat_policy",
+    "combat_policy_status",
+    "activate_combat_policy",
+    "abort_combat_policy",
   ]) {
     if (!names.has(required)) {
       throw new Error(

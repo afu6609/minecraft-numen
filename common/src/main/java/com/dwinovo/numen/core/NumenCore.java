@@ -109,6 +109,8 @@ public final class NumenCore {
 
     private static void registerLifecycleEvents() {
         CompanionLifecycle.onDeath(companion -> {
+            com.dwinovo.numen.core.task.combat.CombatPolicyExecutionTracker
+                    .recordDeath(companion);
             java.util.Map<String, Object> data =
                     new java.util.LinkedHashMap<>(
                             com.dwinovo.numen.core.event.CompanionEventBus.bodySnapshot(companion));
@@ -164,6 +166,8 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LookupRecipeTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.CraftTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanNearbyEntitiesTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.combat.observe.ObserveEntityIntentTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.combat.observe.GetCombatTraceTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanBlocksTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.ObserveVolumeTool());
@@ -175,6 +179,7 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.TodoWriteTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LoadSkillTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.PollCompanionEventsTool());
+        com.dwinovo.numen.core.combat.policy.tool.CombatPolicyToolRegistrar.registerAll();
     }
 
 
