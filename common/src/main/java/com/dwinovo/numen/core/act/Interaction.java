@@ -366,10 +366,11 @@ public final class Interaction {
         InputDriver.halt(player);
         InputDriver.lookAt(player, entity.getEyePosition());
         for (InteractionHand h : HANDS) {
-            if (entity.interact(player, h).consumesAction()) {       // animals / villagers
-                return true;
-            }
-            if (player.interactOn(entity, h).consumesAction()) {     // item frames / leads
+            // ServerPlayer#interactOn runs the normal Forge interaction hook
+            // before delegating to the target. Calling Entity#interact first
+            // bypassed server-side policy mods and could also apply the same
+            // interaction twice when it returned PASS.
+            if (player.interactOn(entity, h).consumesAction()) {
                 return true;
             }
         }

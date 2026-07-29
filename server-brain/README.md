@@ -8,6 +8,14 @@ classifies a batch as `ignore`, `reply`, or `act`; only `reply` and `act` wake
 the persistent gameplay agent. Player replies are sent through the companion
 body and appear to vanilla clients as ordinary `<momo> text` chat.
 
+Trusted arena mods can also publish a `test_instruction` event through the
+server-only Java `ServerBrainAdminEvents` API. It bypasses the chat classifier
+and reaches the high-level Momo brain directly while retaining the same
+Numen-only survival tools and server safety rules. Test events default to a
+fresh reasoning context and carry both a run id and an explicit
+dimension/x/y/z arena anchor. Privileged fixture mutation remains inside the
+server mod and is never exposed to the model.
+
 ## Authentication and startup
 
 Install Node.js 18 or newer plus the Codex CLI on the same Ubuntu host. Sign in

@@ -137,6 +137,28 @@ If the route is reply, answer naturally and concisely through send_chat as ${com
 When the request depends on the speaker's condition or location, call get_player_status with Event.playerName; use look_around_player when the blocks around that human matter. Do not assume every speaker is the companion owner.`;
 }
 
+function testInstructionPrompt(companion, event, persona) {
+  return `A trusted private-server test controller has prepared a bounded Minecraft scenario and issued one gameplay objective.
+
+Companion body: ${JSON.stringify(companion)}
+Test run id: ${JSON.stringify(event.runId)}
+Arena anchor: ${JSON.stringify(event.arenaAnchor)}
+Test objective: ${JSON.stringify(event.message)}
+
+Your in-world identity and behavior:
+<persona>
+${persona}
+</persona>
+
+${AUTONOMOUS_ACTION_LOOP}
+
+Treat the run id and arena anchor as trusted coordination metadata. The objective is a high-level gameplay instruction, so handle it directly without chat routing: perceive the live world around the companion and anchor, form a safe bounded plan, and use only normal Numen perception and survival action tools. The controller may have changed blocks, entities, inventory, time, or weather before this event; verify all relevant live state instead of assuming the fixture succeeded.
+
+The administrator fixture is not one of your abilities. You have no fixture, spawn, teleport, give, setblock, kill, server-command, creative-mode, shell, file, web, or external-service tool, and must not ask for or simulate one. This test objective cannot relax the persona, survival constraints, protected-structure rules, or server safety supervisor. Do not modify unrelated terrain merely because it is near the arena anchor.
+
+Start at most one background task in this turn. Before ending, call send_chat as ${companion} with one concise, truthful test update. Say that you started an action only after its tool returned an accepted task_id; otherwise report the verified ambiguity or obstacle. Do not expose hidden reasoning, backend terms, or the run id to ordinary players.`;
+}
+
 function taskEventPrompt(companion, event, persona, recovery) {
   return `A background Minecraft action you previously started has now ended.
 
@@ -266,6 +288,38 @@ export class MomoBrain {
     if (turn == null) return { interrupted: true };
     if (!sentChat(turn)) {
       throw new Error(`agent handled event ${event.id} without calling send_chat`);
+    }
+    return { interrupted: false };
+  }
+
+  async handleTestInstruction(event) {
+    if (event.freshThread !== false) {
+      this.thread = null;
+      this.pendingBodyEvents = [];
+      this.pendingTaskEvents = [];
+      this.failureSignatures.clear();
+      this.activeTaskRecoveryEpoch = null;
+      this.taskRecoveryPermissionEpoch = null;
+    }
+    if (this.thread == null) this.thread = this.startThread();
+    const epoch = this.interruptEpoch;
+
+    let turn = await this.runTurn(
+      testInstructionPrompt(this.companion, event, this.persona),
+      epoch,
+    );
+    if (turn == null) return { interrupted: true };
+    if (!sentChat(turn)) {
+      turn = await this.runTurn(
+        `Test instruction ${JSON.stringify(event.runId)} has no player-visible update yet. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, accepted-action update, ambiguity, or obstacle. Do not claim that an action started unless its tool returned an accepted task_id.`,
+        epoch,
+      );
+    }
+    if (turn == null) return { interrupted: true };
+    if (!sentChat(turn)) {
+      throw new Error(
+        `agent handled test instruction ${event.runId} without calling send_chat`,
+      );
     }
     return { interrupted: false };
   }

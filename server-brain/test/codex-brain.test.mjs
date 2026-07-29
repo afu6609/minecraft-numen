@@ -153,6 +153,111 @@ test("task completion returns to the persistent brain for verification", async (
   assert.match(prompts[0], /actually returns an accepted task_id/);
 });
 
+test("trusted test instruction gets a fresh high-level context and normal survival tools", async () => {
+  let starts = 0;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => {
+      starts += 1;
+      return {
+        async run(prompt) {
+          prompts.push(prompt);
+          return {
+            items: [{
+              type: "mcp_tool_call",
+              server: "numen",
+              tool: "send_chat",
+              status: "completed",
+            }],
+          };
+        },
+      };
+    },
+    "momo",
+    "你是游戏玩家桃桃。",
+  );
+
+  await brain.handle(
+    { id: 70, playerName: "Alex", message: "你好" },
+    { id: 70, route: "reply", reason: "greeting" },
+  );
+  await brain.handleTestInstruction({
+    id: 71,
+    type: "test_instruction",
+    companionName: "momo",
+    runId: "arena-71",
+    message: "击杀前面的僵尸并保证存活",
+    arenaAnchor: {
+      dimension: "minecraft:overworld",
+      x: 120,
+      y: 72,
+      z: -40,
+    },
+    freshThread: true,
+  });
+
+  assert.equal(starts, 2);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /arena-71/);
+  assert.match(prompts[1], /minecraft:overworld/);
+  assert.match(prompts[1], /normal Numen perception and survival action tools/);
+  assert.match(prompts[1], /no fixture, spawn, teleport, give, setblock, kill/);
+  assert.match(prompts[1], /server safety supervisor/);
+  assert.match(prompts[1], /Start at most one background task/);
+});
+
+test("test continuation can deliberately reuse the current context", async () => {
+  let starts = 0;
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => {
+      starts += 1;
+      return {
+        async run(prompt) {
+          prompts.push(prompt);
+          return {
+            items: [{
+              type: "mcp_tool_call",
+              server: "numen",
+              tool: "send_chat",
+              status: "completed",
+            }],
+          };
+        },
+      };
+    },
+    "momo",
+  );
+  const base = {
+    type: "test_instruction",
+    companionName: "momo",
+    runId: "arena-72",
+    arenaAnchor: {
+      dimension: "minecraft:overworld",
+      x: 0,
+      y: 64,
+      z: 0,
+    },
+  };
+
+  await brain.handleTestInstruction({
+    ...base,
+    id: 72,
+    message: "观察测试目标",
+    freshThread: true,
+  });
+  await brain.handleTestInstruction({
+    ...base,
+    id: 73,
+    message: "继续刚才的方案",
+    freshThread: false,
+  });
+
+  assert.equal(starts, 1);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /继续刚才的方案/);
+});
+
 test("repeated state mismatch trips the placement retry fuse despite goto", async () => {
   const prompts = [];
   const brain = new MomoBrain(

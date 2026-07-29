@@ -14,6 +14,10 @@ import {
   parseStopRequest,
   ServerControlGateway,
 } from "./server-control.mjs";
+import {
+  decodeTestInstructionEvent,
+  dispatchFreshTestInstruction,
+} from "./arena-event.mjs";
 
 function log(level, message, details = {}) {
   const entry = {
@@ -26,6 +30,7 @@ function log(level, message, details = {}) {
 }
 
 function inboxPriority(event) {
+  if (event?.type === "test_instruction") return 3;
   if (
     event?.type === "damage_received" ||
     event?.type === "defense_started" ||
@@ -114,10 +119,13 @@ export async function run({
   const poller = (async () => {
     let consecutiveErrors = 0;
     let bodyPollErrors = 0;
+    let deferredServerEvents = [];
     try {
       do {
         try {
-          const events = await client.pollServerEvents(config.eventBatchSize);
+          const events = deferredServerEvents.length > 0
+            ? deferredServerEvents.splice(0)
+            : await client.pollServerEvents(config.eventBatchSize);
           let bodyEvents = [];
           try {
             bodyEvents = await client.pollCompanionEvents(
@@ -139,7 +147,89 @@ export async function run({
               });
             }
           }
-          for (const event of events) {
+
+          // Companion telemetry was captured before any fresh test fence in
+          // this poll cycle. Queue it in the old generation first so a fresh
+          // server event below can reliably cancel it.
+          for (const event of bodyEvents) {
+            if (event.type === "defense_started" || event.type === "death") {
+              const interruptedTurn = brain.interrupt({
+                preserveTaskRecovery: true,
+              });
+              log(
+                event.type === "death" ? "warn" : "info",
+                "urgent body event interrupted stale reasoning",
+                {
+                  eventId: event.id,
+                  companion: event.companionName,
+                  type: event.type,
+                  interruptedTurn,
+                },
+              );
+            }
+            inbox.push({
+              event,
+              decision: null,
+              commandRequest: null,
+            });
+          }
+
+          for (
+            let eventIndex = 0;
+            eventIndex < events.length;
+            eventIndex += 1
+          ) {
+            const event = events[eventIndex];
+            const decodedTestInstruction = decodeTestInstructionEvent(
+              event,
+              config.companion,
+            );
+            if (decodedTestInstruction.kind === "invalid") {
+              log("warn", "invalid test instruction ignored", {
+                eventId: event.id,
+                reason: decodedTestInstruction.reason,
+              });
+              continue;
+            }
+            if (decodedTestInstruction.kind === "test_instruction") {
+              const testEvent = decodedTestInstruction.event;
+              if (testEvent.freshThread) {
+                const dispatch = await dispatchFreshTestInstruction({
+                  client,
+                  companion: config.companion,
+                  event: testEvent,
+                  inbox,
+                  brain,
+                });
+                if (!dispatch.ok) {
+                  // The MCP event has already been drained. Retain it and all
+                  // later events locally, then retry the stop fence before
+                  // polling another server batch.
+                  deferredServerEvents = events.slice(eventIndex);
+                  log("warn", "fresh test instruction deferred", {
+                    eventId: testEvent.id,
+                    runId: testEvent.runId,
+                    companion: testEvent.companionName,
+                    interruptedTurn: dispatch.interruptedTurn,
+                    reason: dispatch.reason,
+                  });
+                  break;
+                }
+                log("info", "fresh test instruction queued", {
+                  eventId: testEvent.id,
+                  runId: testEvent.runId,
+                  companion: testEvent.companionName,
+                  interruptedTurn: dispatch.interruptedTurn,
+                });
+                continue;
+              }
+              inbox.push({
+                event: testEvent,
+                decision: null,
+                commandRequest: null,
+              });
+              continue;
+            }
             const controlRequest = parseStopRequest(event);
             const commandRequest = parseServerCommandRequest(
               event,
@@ -165,28 +255,6 @@ export async function run({
               event,
               decision: null,
               commandRequest,
-            });
-          }
-          for (const event of bodyEvents) {
-            if (event.type === "defense_started" || event.type === "death") {
-              const interruptedTurn = brain.interrupt({
-                preserveTaskRecovery: true,
-              });
-              log(
-                event.type === "death" ? "warn" : "info",
-                "urgent body event interrupted stale reasoning",
-                {
-                  eventId: event.id,
-                  companion: event.companionName,
-                  type: event.type,
-                  interruptedTurn,
-                },
-              );
-            }
-            inbox.push({
-              event,
-              decision: null,
-              commandRequest: null,
             });
           }
           consecutiveErrors = 0;
@@ -241,10 +309,31 @@ export async function run({
 
       for (const { event, decision, commandRequest } of pending) {
         if (inbox.isCancelled(event)) {
-          log("info", "stale chat cancelled by direct stop", {
+          log("info", "stale event cancelled by control fence", {
             eventId: event.id,
+            type: event.type,
             player: event.playerName,
+            status: event.status,
           });
+          continue;
+        }
+        if (event.type === "test_instruction") {
+          log("info", "test instruction dispatched directly", {
+            eventId: event.id,
+            runId: event.runId,
+            companion: event.companionName,
+            freshThread: event.freshThread,
+            arenaAnchor: event.arenaAnchor,
+          });
+          try {
+            await brain.handleTestInstruction(event);
+          } catch (error) {
+            log("error", "test instruction handling failed", {
+              eventId: event.id,
+              runId: event.runId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           continue;
         }
         if (event.type === "task_finished") {
