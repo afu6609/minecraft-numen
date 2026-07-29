@@ -102,6 +102,19 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  takes a moment to spawn, and without this window the body sprints for the next
      *  ore before the item pops and leaves it behind. */
     private static final int DROP_LOITER_TICKS = 5;
+    /**
+     * A failed A* search used to be retried on the very next server tick. One
+     * awkward deposit could therefore consume a full search budget 20 times a
+     * second and starve the Minecraft thread. Cool down before selecting the
+     * next candidate so failure is cheap and observable.
+     */
+    private static final int NAV_RETRY_COOLDOWN_TICKS = 20;
+    /** Stop one gather job after repeated failures without any item progress. */
+    private static final int MAX_CONSECUTIVE_NAV_FAILURES = 6;
+    /** Absolute ceiling even when occasional drops reset the consecutive count. */
+    private static final int MAX_TOTAL_NAV_FAILURES = 18;
+    /** A refreshed scan may expose new cells forever; cap rejected cells per job. */
+    private static final int MAX_BLACKLISTED_TARGETS = 24;
 
     private final List<BlockPos> knownOres = new ArrayList<>();
     private final Set<BlockPos> blacklist = new HashSet<>();
@@ -133,6 +146,11 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private CompletableFuture<List<BlockScanner.Hit>> scan;
     /** Game time by which the in-flight scan must finish or be abandoned. */
     private long scanDeadline;
+    /** Navigation failure circuit-breaker state. */
+    private int consecutiveNavFailures;
+    private int totalNavFailures;
+    private int lastGathered;
+    private long navRetryAfterTick;
 
     // Progressive dig (blocks break tick-by-tick at legitimate player speed, not
     // instabreak) — shared with the path executor so all breaking reads the same.
@@ -169,6 +187,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         // blocks drop, and snapshot how many we already hold so the tally is the delta above it.
         dropItems = computeDropItems();
         baseline = inventoryMatch();
+        lastGathered = 0;
         // 首扫也走后台线程(加载区边界内的环形扫描可能要啃整个加载区,
         // 不挂 tick);结果落地前 onTick 的终局判定会等着。
         kickScan();
@@ -178,6 +197,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     protected TaskState onTick() {
         int gathered = Math.max(0, inventoryMatch() - baseline);   // matching items gained so far
         r.setMined(gathered);
+        if (gathered > lastGathered) {
+            consecutiveNavFailures = 0;
+            lastGathered = gathered;
+        }
         if (gathered >= r.count) {
             progressNote = "gathered all requested";
             return TaskState.SUCCESS;
@@ -229,6 +252,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         if (!knownOres.isEmpty() || !drops.isEmpty()) {
             branchTicks = 0;
             if (nav == null || navIsBranch) {
+                if (level.getGameTime() < navRetryAfterTick) {
+                    return TaskState.RUNNING;
+                }
                 stopNav();
                 // Compiled front door: every known ore is SACRED — the route gets the
                 // body to the ore; digging it is THIS task's job (with this task's
@@ -253,6 +279,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                                         + " goal, nothing reachable (LOS/reach)",
                                 player.blockPosition().toShortString());
                         blacklistNearest();
+                        if (recordNavigationFailure("arrived at an unusable mining stance")) {
+                            return TaskState.FAILED;
+                        }
                     }
                     return TaskState.RUNNING;   // a reachable shaft is handled next tick
                 }
@@ -260,8 +289,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     com.dwinovo.numen.Constants.LOG.info(
                             "[numen-task] mine nav failed ({}): {}",
                             nav.failType(), nav.failReason());
+                    String reason = nav.failReason();
                     blacklistNearest();
                     stopNav();
+                    if (recordNavigationFailure(reason)) {
+                        return TaskState.FAILED;
+                    }
                     return TaskState.RUNNING;
                 }
             }
@@ -476,6 +509,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 knownOres.remove(pos);
                 anticipatedDrops.put(pos.immutable(),
                         player.level().getGameTime() + DROP_LOITER_TICKS);
+                consecutiveNavFailures = 0;
                 clearNoShot();
             }
             case NO_SHOT -> {
@@ -651,6 +685,37 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                             p.toShortString(), feet.toShortString(), knownOres.size(),
                             blacklist.size());
                 });
+    }
+
+    /**
+     * Account one terminal navigation attempt and open the circuit when retrying
+     * is no longer useful. This is deliberately task-level rather than an A*
+     * tuning knob: even different unreachable targets must not combine into an
+     * unbounded server load.
+     */
+    private boolean recordNavigationFailure(String detail) {
+        consecutiveNavFailures++;
+        totalNavFailures++;
+        navRetryAfterTick = player.level().getGameTime() + NAV_RETRY_COOLDOWN_TICKS;
+        if (consecutiveNavFailures < MAX_CONSECUTIVE_NAV_FAILURES
+                && totalNavFailures < MAX_TOTAL_NAV_FAILURES
+                && blacklist.size() < MAX_BLACKLISTED_TARGETS) {
+            return false;
+        }
+        stopNav();
+        progressNote = "navigation circuit breaker opened";
+        fail("navigation stopped after " + totalNavFailures
+                        + " failed route(s), " + blacklist.size()
+                        + " rejected target(s), and " + r.getMined() + "/" + r.count
+                        + " gathered; last failure: "
+                        + (detail == null || detail.isBlank() ? "target unreachable" : detail),
+                FailureType.NO_PATH);
+        com.dwinovo.numen.Constants.LOG.warn(
+                "[numen-task] mine navigation circuit opened: failures={}, consecutive={},"
+                        + " blacklisted={}, gathered={}/{}",
+                totalNavFailures, consecutiveNavFailures, blacklist.size(),
+                r.getMined(), r.count);
+        return true;
     }
 
     /** Terminal "nothing gathered, no ore left to go for" failure, distinguishing a
