@@ -17,18 +17,34 @@ export class ServerControlGateway {
   }
 
   async handle() {
-    try {
-      await this.client.stopTask(this.companion);
+    const results = await Promise.allSettled([
+      this.client.stopTask(this.companion),
+      this.client.stopNativeNavigation(this.companion),
+    ]);
+    const stopped = results.some((result) => result.status === "fulfilled");
+    if (stopped) {
       await this.client.sendChat(this.companion, "好，我停下了。");
       return { ok: true };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (/没有进行中的后台任务|already idle|no background task/iu.test(reason)) {
-        await this.client.sendChat(this.companion, "我现在没在忙呀。");
-        return { ok: true, reason: "already idle" };
-      }
-      await this.client.sendChat(this.companion, "我没能立刻停下，稍等一下。");
-      return { ok: false, reason: reason.slice(0, 180) };
     }
+    const reasons = results
+      .filter((result) => result.status === "rejected")
+      .map((result) =>
+        result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason),
+      );
+    if (
+      reasons.length > 0 &&
+      reasons.every((reason) =>
+        /没有进行中的后台任务|already idle|no background task|no active native navigation task/iu.test(
+          reason,
+        )
+      )
+    ) {
+      await this.client.sendChat(this.companion, "我现在没在忙呀。");
+      return { ok: true, reason: "already idle" };
+    }
+    await this.client.sendChat(this.companion, "我没能立刻停下，稍等一下。");
+    return { ok: false, reason: reasons.join("; ").slice(0, 180) };
   }
 }

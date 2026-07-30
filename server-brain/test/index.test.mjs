@@ -10,6 +10,8 @@ const required = [
   "send_chat",
   "run_command",
   "task_stop",
+  "embodied_nav_status",
+  "embodied_nav_stop",
   "follow_player",
   "structure_plan",
   "structure_status",

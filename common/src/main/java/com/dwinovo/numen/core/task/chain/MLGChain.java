@@ -62,6 +62,10 @@ public final class MLGChain implements TaskChain, com.dwinovo.numen.task.reflex.
         if (!com.dwinovo.numen.task.reflex.ReflexRegistry.enabled(id())) {
             return SurvivalDecisions.DORMANT;   // reflex switched off by the owner
         }
+        if (companion.onGround()
+                || companion.fallDistance < SurvivalDecisions.MLG_FALL_TRIGGER) {
+            return SurvivalDecisions.DORMANT;
+        }
         boolean canSave = waterBucketSlot(companion) >= 0 || softBlockSlot(companion) >= 0;
         return SurvivalDecisions.mlgPriority(companion.onGround(), companion.fallDistance, canSave);
     }
@@ -113,6 +117,11 @@ public final class MLGChain implements TaskChain, com.dwinovo.numen.task.reflex.
     @Override
     public String name() {
         return "mlg";
+    }
+
+    @Override
+    public com.dwinovo.numen.task.control.BodyControlClass controlClass() {
+        return com.dwinovo.numen.task.control.BodyControlClass.CRITICAL_REFLEX;
     }
 
     // ---- Reflex roster paperwork (constitution §6) ----

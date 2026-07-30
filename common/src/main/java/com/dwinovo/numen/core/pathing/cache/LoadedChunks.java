@@ -3,22 +3,22 @@ package com.dwinovo.numen.core.pathing.cache;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 /**
- * An immutable snapshot of the loaded chunks near a level's companions — a thread-safe copy of the
- * chunk provider's "what is loaded right now". Built on
- * the main thread once per tick ({@link PathCaches#serverTick}) and read by the planner (off-thread
- * from P-C). It holds live {@link LevelChunk} references, so a lookup reads the LIVE section
+ * An immutable snapshot of the loaded chunks near a path request — a thread-safe copy of the
+ * chunk provider's "what is loaded right now". Built or briefly reused by
+ * {@link PathCaches#ensureSnapshot} and read by the planner off-thread. It holds live
+ * {@link LevelChunk} references, so a lookup reads the LIVE section
  * palette — exact for loaded terrain. We tolerate the rare race of reading
  * a palette the main thread is concurrently resizing (the reader catches it and yields AIR; the
  * executor re-costs live and replans) — a deliberate exactness-for-cheapness trade.
  *
  * <p>Never mutated after construction, so a worker reading the map structure can't race a writer — only
- * the shared chunk CONTENTS are live. A fresh snapshot is published (via {@link PathCaches}'s
- * {@link java.util.concurrent.ConcurrentHashMap}) each tick; an in-flight search keeps the snapshot it
- * started with.
+ * the shared chunk CONTENTS are live. A newly built snapshot is published through
+ * {@link PathCaches}; an in-flight search keeps the immutable map it started with.
  */
 public final class LoadedChunks {
 
@@ -27,10 +27,21 @@ public final class LoadedChunks {
      *  — captured on the main thread so the don't-grief check is answerable off-thread without a live
      *  read (presence is all {@code shouldAvoidBreaking} needs). */
     private final LongSet blockEntities;
+    /**
+     * Chunks whose block-entity position list exceeded the bounded snapshot
+     * budget. Treating every block there as protected is conservative: a
+     * pathological chunk cannot turn one path request into an unbounded
+     * main-thread scan, and the planner never griefs an unknown container.
+     */
+    private final LongSet opaqueBlockEntityChunks;
 
-    LoadedChunks(Long2ObjectMap<LevelChunk> chunks, LongSet blockEntities) {
+    LoadedChunks(
+            Long2ObjectMap<LevelChunk> chunks,
+            LongSet blockEntities,
+            LongSet opaqueBlockEntityChunks) {
         this.chunks = chunks;
         this.blockEntities = blockEntities;
+        this.opaqueBlockEntityChunks = opaqueBlockEntityChunks;
     }
 
     /** The loaded chunk at the given chunk coordinates, or {@code null} if it wasn't loaded when this
@@ -44,7 +55,10 @@ public final class LoadedChunks {
      *  {@link #at}, and a cell outside the snapshot reads AIR (so the don't-grief check, which only
      *  runs on a breakable block, is never consulted there). */
     public boolean hasBlockEntity(BlockPos pos) {
-        return blockEntities.contains(pos.asLong());
+        return blockEntities.contains(pos.asLong())
+                || opaqueBlockEntityChunks.contains(ChunkPos.asLong(
+                        SectionPos.blockToSectionCoord(pos.getX()),
+                        SectionPos.blockToSectionCoord(pos.getZ())));
     }
 
     /** Number of chunks captured — for debug / memory accounting. */

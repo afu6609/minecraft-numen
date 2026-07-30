@@ -207,6 +207,11 @@ public final class BreathChain implements TaskChain, com.dwinovo.numen.task.refl
         return "breath";
     }
 
+    @Override
+    public com.dwinovo.numen.task.control.BodyControlClass controlClass() {
+        return com.dwinovo.numen.task.control.BodyControlClass.CRITICAL_REFLEX;
+    }
+
     // ---- Reflex roster paperwork (constitution §6) ----
 
     @Override

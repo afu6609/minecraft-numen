@@ -164,6 +164,94 @@ test("task completion returns to the persistent brain for verification", async (
   assert.match(prompts[0], /actually returns an accepted task_id/);
 });
 
+test("supervised mode does not continue an orphan task event", async () => {
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+  );
+
+  const result = await brain.handleTaskEvent({
+    id: 131,
+    type: "task_finished",
+    taskId: "old-task",
+    taskName: "build",
+    status: "done",
+    message: "finished before this brain started",
+  });
+
+  assert.equal(turns, 0);
+  assert.equal(result.held, true);
+});
+
+test("supervised explicit goal may reconcile until its body-work lease closes", async () => {
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+  );
+
+  brain.beginExplicitGoal();
+  brain.refreshGoalLease(true);
+  await brain.handleTaskEvent({
+    id: 132,
+    type: "task_finished",
+    taskId: "player-task",
+    taskName: "build",
+    status: "done",
+    message: "checkpoint done",
+  });
+  assert.equal(turns, 1);
+
+  brain.refreshGoalLease(false);
+  const held = await brain.handleBodyEvent({
+    id: 133,
+    type: "body_available",
+  });
+  assert.equal(turns, 1);
+  assert.equal(held.held, true);
+});
+
+test("supervised mode drops orphan body telemetry instead of replaying it later", async () => {
+  const prompts = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run(prompt) {
+        prompts.push(prompt);
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+  );
+
+  const held = await brain.handleBodyEvent({
+    id: 134,
+    type: "body_log",
+    message: "stale event from before an explicit goal",
+  });
+  assert.equal(held.held, true);
+
+  brain.beginExplicitGoal();
+  await brain.retryBodyContext();
+  assert.equal(prompts.length, 0);
+});
+
 test("trusted test instruction gets a fresh high-level context and normal survival tools", async () => {
   let starts = 0;
   const prompts = [];

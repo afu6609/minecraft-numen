@@ -221,7 +221,7 @@ public final class DebugCommands {
         if (companion == null) {
             return 0;
         }
-        CompanionTickDispatcher.stopActive(companion, "stopped by command");
+        CompanionTickDispatcher.stopAny(companion, "stopped by command");
         ctx.getSource().sendSuccess(() -> Component.literal(
                 companion.getName().getString() + " 的当前任务已叫停"), false);
         return 1;

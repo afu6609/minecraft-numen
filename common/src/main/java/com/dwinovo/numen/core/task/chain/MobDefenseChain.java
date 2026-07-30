@@ -70,6 +70,8 @@ import java.util.UUID;
  * routing and tick-sensitive execution.
  */
 public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.reflex.Reflex {
+    /** Idle discovery is event-assisted; a damage event wakes ThreatMemory immediately. */
+    private static final int IDLE_SCAN_INTERVAL_TICKS = 10;
 
     private static final double SCAN_RADIUS = 32.0;
     private static final double RECENT_ATTACKER_RADIUS = 40.0;
@@ -141,6 +143,7 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
     private LivingEntity lastFocus;
 
     private long contextTick = Long.MIN_VALUE;
+    private long nextIdleScanTick = Long.MIN_VALUE;
     private ThreatContext cachedContext;
     private long terrainTick = Long.MIN_VALUE;
     private CombatTerrainProbe.Result terrain;
@@ -327,6 +330,11 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
     @Override
     public String name() {
         return "mob_defense";
+    }
+
+    @Override
+    public com.dwinovo.numen.task.control.BodyControlClass controlClass() {
+        return com.dwinovo.numen.task.control.BodyControlClass.DEFENSIVE_REFLEX;
     }
 
     @Override
@@ -1145,8 +1153,31 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
         long now = self.level().getGameTime();
         if (contextTick == now && cachedContext != null) return cachedContext;
 
+        EngagementDirective directive = EngagementDirective.SURVIVAL_ONLY;
+        TaskRecord task = CompanionTickDispatcher.asyncTaskFor(self.getUUID());
+        List<Integer> explicitIds = List.of();
+        if (task instanceof MeleeAttackTaskRecord meleeTask) {
+            explicitIds = meleeTask.entityIds;
+            directive = EngagementDirective.EXPLICIT_COMBAT;
+        } else if (task instanceof RangedAttackTaskRecord rangedTask) {
+            explicitIds = rangedTask.entityIds;
+            directive = EngagementDirective.EXPLICIT_COMBAT;
+        }
+
         Map<Integer, LivingEntity> found = new LinkedHashMap<>();
         LivingEntity recent = ThreatMemory.resolveRecentAttacker(self);
+        if (!episodeActive
+                && recent == null
+                && explicitIds.isEmpty()
+                && now < nextIdleScanTick) {
+            cachedContext = new ThreatContext(
+                    List.of(), Map.of(), directive);
+            contextTick = now;
+            return cachedContext;
+        }
+        if (!episodeActive && recent == null && explicitIds.isEmpty()) {
+            nextIdleScanTick = now + IDLE_SCAN_INTERVAL_TICKS;
+        }
         AABB scan = self.getBoundingBox().inflate(SCAN_RADIUS);
         for (Mob mob : self.level().getEntitiesOfClass(Mob.class, scan)) {
             if (!mob.isAlive()) continue;
@@ -1162,16 +1193,6 @@ public final class MobDefenseChain implements TaskChain, com.dwinovo.numen.task.
             found.put(recent.getId(), recent);
         }
 
-        EngagementDirective directive = EngagementDirective.SURVIVAL_ONLY;
-        TaskRecord task = CompanionTickDispatcher.asyncTaskFor(self.getUUID());
-        List<Integer> explicitIds = List.of();
-        if (task instanceof MeleeAttackTaskRecord meleeTask) {
-            explicitIds = meleeTask.entityIds;
-            directive = EngagementDirective.EXPLICIT_COMBAT;
-        } else if (task instanceof RangedAttackTaskRecord rangedTask) {
-            explicitIds = rangedTask.entityIds;
-            directive = EngagementDirective.EXPLICIT_COMBAT;
-        }
         if (!explicitIds.isEmpty() && self.level() instanceof ServerLevel level) {
             boolean safelySheltered = shelter != null
                     && isInside(shelter, self.blockPosition())

@@ -84,6 +84,11 @@ public final class UnstuckChain implements TaskChain, com.dwinovo.numen.task.ref
         return "unstuck";
     }
 
+    @Override
+    public com.dwinovo.numen.task.control.BodyControlClass controlClass() {
+        return com.dwinovo.numen.task.control.BodyControlClass.RECOVERY_REFLEX;
+    }
+
     // ---- Reflex roster paperwork (constitution §6) ----
 
     @Override

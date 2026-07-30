@@ -64,6 +64,14 @@ public final class FoodChain implements TaskChain, com.dwinovo.numen.task.reflex
         if (eat == null && companion.isUsingItem()) return Float.NEGATIVE_INFINITY;
         int foodLevel = companion.getFoodData().getFoodLevel();
         float health = companion.getHealth();
+        if (health > SurvivalDecisions.LOW_HEALTH
+                && foodLevel > SurvivalDecisions.HUNGRY_LEVEL) {
+            return SurvivalDecisions.DORMANT;
+        }
+        if (health <= SurvivalDecisions.LOW_HEALTH
+                && foodLevel >= SurvivalDecisions.REGEN_FOOD_LEVEL) {
+            return SurvivalDecisions.DORMANT;
+        }
         boolean hasEdible = bestEdibleSlot(companion) >= 0;
         return SurvivalDecisions.foodPriority(foodLevel, health, hasEdible);
     }
@@ -106,6 +114,11 @@ public final class FoodChain implements TaskChain, com.dwinovo.numen.task.reflex
     @Override
     public String name() {
         return "food";
+    }
+
+    @Override
+    public com.dwinovo.numen.task.control.BodyControlClass controlClass() {
+        return com.dwinovo.numen.task.control.BodyControlClass.MAINTENANCE_REFLEX;
     }
 
     // ---- Reflex roster paperwork (constitution §6) ----

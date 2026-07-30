@@ -1,6 +1,7 @@
 import path from "node:path";
 
 const REASONING_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh"]);
+const ACTIVITY_MODES = new Set(["supervised", "autonomous"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 function integer(env, key, fallback, { min, max }) {
@@ -22,6 +23,16 @@ function reasoningEffort(env, key, fallback) {
   const value = nonEmpty(env, key, fallback);
   if (!REASONING_EFFORTS.has(value)) {
     throw new TypeError(`${key} must be one of ${[...REASONING_EFFORTS].join(", ")}`);
+  }
+  return value;
+}
+
+function activityMode(env) {
+  const value = nonEmpty(env, "MOMO_ACTIVITY_MODE", "supervised").toLowerCase();
+  if (!ACTIVITY_MODES.has(value)) {
+    throw new TypeError(
+      `MOMO_ACTIVITY_MODE must be one of ${[...ACTIVITY_MODES].join(", ")}`,
+    );
   }
   return value;
 }
@@ -51,6 +62,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     mcpUrl: mcpUrl.toString(),
     mcpToken: env.NUMEN_MCP_TOKEN?.trim() ?? "",
     companion: nonEmpty(env, "MOMO_COMPANION", "momo"),
+    activityMode: activityMode(env),
     classifierModel: nonEmpty(env, "MOMO_CLASSIFIER_MODEL", "gpt-5.4-mini"),
     agentModel: nonEmpty(env, "MOMO_AGENT_MODEL", "gpt-5.6-luna"),
     classifierReasoning: reasoningEffort(

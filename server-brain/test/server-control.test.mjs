@@ -25,6 +25,9 @@ test("stop gateway interrupts the active task before acknowledging", async () =>
       async stopTask(companion) {
         calls.push(["stop", companion]);
       },
+      async stopNativeNavigation(companion) {
+        calls.push(["stop-nav", companion]);
+      },
       async sendChat(companion, message) {
         calls.push(["chat", companion, message]);
       },
@@ -35,6 +38,7 @@ test("stop gateway interrupts the active task before acknowledging", async () =>
   assert.deepEqual(await gateway.handle(), { ok: true });
   assert.deepEqual(calls, [
     ["stop", "momo"],
+    ["stop-nav", "momo"],
     ["chat", "momo", "好，我停下了。"],
   ]);
 });

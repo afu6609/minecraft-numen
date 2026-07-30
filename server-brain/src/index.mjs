@@ -54,6 +54,8 @@ export async function verifyMcp(client) {
     "send_chat",
     "run_command",
     "task_stop",
+    "embodied_nav_status",
+    "embodied_nav_stop",
     "follow_player",
     "structure_plan",
     "structure_status",
@@ -93,6 +95,21 @@ export async function run({
   const persona = (await readFile(config.personaFile, "utf8")).trim();
   if (persona === "") throw new Error("MOMO_PERSONA_FILE must not be empty");
   const { router, brain } = createCodexRuntimes(Codex, config, persona);
+  const refreshGoalLease = async (reason) => {
+    if (config.activityMode !== "supervised") return;
+    try {
+      const active = await client.hasActiveBodyWork(config.companion);
+      brain.refreshGoalLease(active);
+      log("info", "supervised goal lease refreshed", { reason, active });
+    } catch (error) {
+      // Fail closed: telemetry loss must not turn into unbounded continuation.
+      brain.refreshGoalLease(false);
+      log("warn", "supervised goal lease closed after status failure", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
   const commandGateway = new ServerCommandGateway(client, config.companion);
   const controlGateway = new ServerControlGateway(client, config.companion);
   const once = argv.includes("--once");
@@ -108,6 +125,7 @@ export async function run({
   log("info", "Momo server brain started", {
     mcp: config.mcpUrl,
     companion: config.companion,
+    activityMode: config.activityMode,
     classifierModel: config.classifierModel,
     agentModel: config.agentModel,
     agentReasoning: config.agentReasoning,
@@ -238,9 +256,7 @@ export async function run({
             );
             if (controlRequest != null) {
               inbox.cancelPlayerChatsThrough(event.id);
-              const interruptedTurn = brain.interrupt({
-                preserveTaskRecovery: false,
-              });
+              const interruptedTurn = brain.enterHold();
               const result = await controlGateway.handle(event, controlRequest);
               log(result.ok ? "info" : "warn", "server control handled", {
                 eventId: event.id,
@@ -334,6 +350,8 @@ export async function run({
               runId: event.runId,
               error: error instanceof Error ? error.message : String(error),
             });
+          } finally {
+            await refreshGoalLease("test_instruction");
           }
           continue;
         }
@@ -353,6 +371,8 @@ export async function run({
               eventId: event.id,
               error: error instanceof Error ? error.message : String(error),
             });
+          } finally {
+            await refreshGoalLease("task_finished");
           }
           continue;
         }
@@ -405,6 +425,8 @@ export async function run({
                 });
               }
             }
+          } finally {
+            await refreshGoalLease("body_context");
           }
           continue;
         }
@@ -440,6 +462,8 @@ export async function run({
             player: event.playerName,
             error: error instanceof Error ? error.message : String(error),
           });
+        } finally {
+          await refreshGoalLease("player_chat");
         }
       }
     }

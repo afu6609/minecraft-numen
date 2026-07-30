@@ -13,10 +13,22 @@ test("configuration defaults to loopback and split models", () => {
   assert.equal(config.classifierReasoning, "low");
   assert.equal(config.agentReasoning, "high");
   assert.equal(config.companion, "momo");
+  assert.equal(config.activityMode, "supervised");
   assert.deepEqual(config.commandPlayers, []);
   assert.equal(
     config.personaFile,
     path.join(config.workingDirectory, "persona", "momo.md"),
+  );
+});
+
+test("activity mode is supervised by default and explicitly opt-in autonomous", () => {
+  assert.equal(
+    loadConfig({ MOMO_ACTIVITY_MODE: "autonomous" }).activityMode,
+    "autonomous",
+  );
+  assert.throws(
+    () => loadConfig({ MOMO_ACTIVITY_MODE: "free" }),
+    /MOMO_ACTIVITY_MODE must be one of supervised, autonomous/,
   );
 });
 

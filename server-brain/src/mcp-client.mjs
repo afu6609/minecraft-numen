@@ -72,6 +72,27 @@ export class NumenMcpClient {
     return this.callTool("task_stop", { companion });
   }
 
+  async stopNativeNavigation(companion) {
+    return this.callTool("embodied_nav_stop", { companion });
+  }
+
+  async hasActiveBodyWork(companion) {
+    const task = JSON.parse(
+      await this.callTool("task_status", { companion }),
+    );
+    if (task?.data?.task_id != null) return true;
+
+    try {
+      const navigation = JSON.parse(
+        await this.callTool("embodied_nav_status", { companion }),
+      );
+      const state = navigation?.data?.state;
+      return ["planning", "moving", "waiting"].includes(state);
+    } catch {
+      return false;
+    }
+  }
+
   async #request(method, params) {
     const id = this.nextId++;
     const headers = {

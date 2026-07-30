@@ -243,10 +243,16 @@ function completedNumenTool(turn, tool) {
 }
 
 export class MomoBrain {
-  constructor(startThread, companion, persona = "") {
+  constructor(
+    startThread,
+    companion,
+    persona = "",
+    activityMode = "autonomous",
+  ) {
     this.startThread = startThread;
     this.companion = companion;
     this.persona = persona;
+    this.activityMode = activityMode;
     this.thread = null;
     this.activeController = null;
     this.interruptEpoch = 0;
@@ -258,6 +264,7 @@ export class MomoBrain {
     this.taskRecoveryPermissionEpoch = null;
     this.activePlayerGoalEpoch = null;
     this.playerGoalRecoveryPermissionEpoch = null;
+    this.supervisedGoalActive = false;
   }
 
   interrupt({
@@ -284,9 +291,48 @@ export class MomoBrain {
       this.playerGoalRecoveryPermissionEpoch = null;
       this.pendingPlayerGoals = [];
     }
+    if (!preserveTaskRecovery && !preservePlayerGoal) {
+      this.supervisedGoalActive = false;
+      this.pendingBodyEvents = [];
+      this.thread = null;
+    }
     if (this.activeController == null) return false;
     this.activeController.abort();
     return true;
+  }
+
+  beginExplicitGoal() {
+    if (this.activityMode === "supervised") {
+      this.supervisedGoalActive = true;
+    }
+  }
+
+  refreshGoalLease(activeBodyWork) {
+    if (this.activityMode === "supervised") {
+      this.supervisedGoalActive = activeBodyWork === true;
+    }
+  }
+
+  continuationAllowed() {
+    return (
+      this.activityMode === "autonomous" ||
+      this.supervisedGoalActive ||
+      this.pendingPlayerGoals.length > 0
+    );
+  }
+
+  enterHold() {
+    const interrupted = this.interrupt({
+      preserveTaskRecovery: false,
+      preservePlayerGoal: false,
+    });
+    this.pendingBodyEvents = [];
+    this.pendingTaskEvents = [];
+    this.pendingPlayerGoals = [];
+    this.failureSignatures.clear();
+    this.supervisedGoalActive = false;
+    this.thread = null;
+    return interrupted;
   }
 
   async runTurn(prompt, epoch) {
@@ -309,6 +355,7 @@ export class MomoBrain {
 
   async handle(event, decision) {
     if (decision.route === "ignore") return;
+    if (decision.route === "act") this.beginExplicitGoal();
     if (this.thread == null) this.thread = this.startThread();
     const epoch = this.interruptEpoch;
     this.activePlayerGoalEpoch = epoch;
@@ -355,7 +402,9 @@ export class MomoBrain {
       this.taskRecoveryPermissionEpoch = null;
       this.activePlayerGoalEpoch = null;
       this.playerGoalRecoveryPermissionEpoch = null;
+      this.supervisedGoalActive = false;
     }
+    this.beginExplicitGoal();
     if (this.thread == null) this.thread = this.startThread();
     const epoch = this.interruptEpoch;
 
@@ -380,7 +429,13 @@ export class MomoBrain {
   }
 
   async handleTaskEvent(event) {
-    if (event.status === "stopped") return;
+    if (event.status === "stopped") {
+      this.refreshGoalLease(false);
+      return { interrupted: false, stopped: true };
+    }
+    if (!this.continuationAllowed()) {
+      return { interrupted: false, held: true };
+    }
     if (this.thread == null) this.thread = this.startThread();
     const epoch = this.interruptEpoch;
     const recovery = this.noteTaskFailure(event);
@@ -506,11 +561,17 @@ export class MomoBrain {
   }
 
   async handleBodyEvent(event) {
+    if (!this.continuationAllowed()) {
+      return { interrupted: false, held: true };
+    }
     this.noteBodyEvent(event);
     return this.drainBodyContext();
   }
 
   async retryBodyContext() {
+    if (!this.continuationAllowed()) {
+      return { interrupted: false, held: true };
+    }
     if (
       this.pendingBodyEvents.length === 0 &&
       this.pendingTaskEvents.length === 0 &&
@@ -659,6 +720,7 @@ export function createCodexRuntimes(Codex, config, persona = "") {
       }),
     config.companion,
     persona,
+    config.activityMode,
   );
   return { router, brain };
 }
