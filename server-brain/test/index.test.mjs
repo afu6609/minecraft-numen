@@ -2,32 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { verifyMcp } from "../src/index.mjs";
+import { GAMEPLAY_ENABLED_TOOLS } from "../src/tool-capabilities.mjs";
 
-const required = [
+const required = [...new Set([
   "list_companions",
   "poll_server_events",
   "poll_companion_events",
-  "send_chat",
   "run_command",
-  "task_stop",
-  "embodied_nav_status",
-  "embodied_nav_stop",
-  "follow_player",
-  "structure_plan",
-  "structure_status",
-  "structure_execute",
-  "structure_patch",
-  "placement_feasibility",
-  "survey_scene",
-  "inspect_object",
-  "observe_entity_intent",
-  "get_combat_trace",
-  "save_combat_policy",
-  "combat_policy_status",
-  "activate_combat_policy",
-  "abort_combat_policy",
   "report_brain_config_state",
-];
+  ...GAMEPLAY_ENABLED_TOOLS,
+])];
 
 function client(names) {
   return {
@@ -38,7 +22,15 @@ function client(names) {
   };
 }
 
-test("MCP verification requires blueprint recovery and supervised combat tools", async () => {
+test("MCP verification requires Embodied, blueprint, and combat tools", async () => {
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "get_owner_status"))),
+    /missing get_owner_status/,
+  );
+  await assert.rejects(
+    verifyMcp(client(required.filter((name) => name !== "observe_volume"))),
+    /missing observe_volume/,
+  );
   await assert.rejects(
     verifyMcp(client(required.filter((name) => name !== "structure_status"))),
     /missing structure_status/,
@@ -54,12 +46,26 @@ test("MCP verification requires blueprint recovery and supervised combat tools",
     /missing placement_feasibility/,
   );
   await assert.rejects(
-    verifyMcp(client(required.filter((name) => name !== "survey_scene"))),
-    /missing survey_scene/,
+    verifyMcp(client(required.filter((name) => name !== "embodied_move_to"))),
+    /missing embodied_move_to/,
   );
   await assert.rejects(
-    verifyMcp(client(required.filter((name) => name !== "inspect_object"))),
-    /missing inspect_object/,
+    verifyMcp(
+      client(required.filter((name) => name !== "embodied_follow_owner")),
+    ),
+    /missing embodied_follow_owner/,
+  );
+  await assert.rejects(
+    verifyMcp(
+      client(required.filter((name) => name !== "embodied_survey_scene")),
+    ),
+    /missing embodied_survey_scene/,
+  );
+  await assert.rejects(
+    verifyMcp(
+      client(required.filter((name) => name !== "embodied_execute_plan")),
+    ),
+    /missing embodied_execute_plan/,
   );
   await assert.rejects(
     verifyMcp(client(required.filter((name) => name !== "get_combat_trace"))),

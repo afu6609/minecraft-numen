@@ -52,6 +52,34 @@ function completedAsyncTaskTurn(
   };
 }
 
+function acceptedTaskWithoutChatTurn(taskId, tool = "craft") {
+  return {
+    items: [{
+      id: `call-${taskId}`,
+      type: "mcp_tool_call",
+      server: "numen",
+      tool,
+      arguments: { companion: "momo" },
+      status: "completed",
+      result: {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            message: "accepted",
+            data: {
+              async: true,
+              task_id: taskId,
+              action_id: "mcp-server-42",
+              task: tool,
+            },
+          }),
+        }],
+      },
+    }],
+  };
+}
+
 test("Codex runtimes isolate the classifier and expose only Numen to the agent", () => {
   const constructed = [];
   class FakeCodex {
@@ -64,18 +92,22 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
     }
   }
 
-  createCodexRuntimes(FakeCodex, {
-    codexPath: "/usr/local/bin/codex",
-    mcpUrl: "http://127.0.0.1:8765/mcp",
-    mcpToken: "secret",
-    agentToolTimeoutSeconds: 330,
-    classifierModel: "small",
-    agentModel: "main",
-    classifierReasoning: "low",
-    agentReasoning: "medium",
-    workingDirectory: "/srv/momo",
-    companion: "momo",
-  });
+  createCodexRuntimes(
+    FakeCodex,
+    {
+      codexPath: "/usr/local/bin/codex",
+      mcpUrl: "http://127.0.0.1:8765/mcp",
+      mcpToken: "secret",
+      agentToolTimeoutSeconds: 330,
+      classifierModel: "small",
+      agentModel: "main",
+      classifierReasoning: "low",
+      agentReasoning: "medium",
+      workingDirectory: "/srv/momo",
+      companion: "momo",
+    },
+    "你是游戏玩家桃桃。",
+  );
 
   assert.equal(constructed.length, 2);
   assert.equal(constructed[0].config.features.shell_tool, false);
@@ -91,6 +123,7 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
   assert.deepEqual(
     constructed[1].config.mcp_servers.numen.disabled_tools,
     [
+      "list_companions",
       "poll_server_events",
       "poll_companion_events",
       "create_companion",
@@ -110,6 +143,26 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
       "placement_feasibility",
     ),
     false,
+  );
+  assert.equal(
+    constructed[1].config.mcp_servers.numen.enabled_tools.includes(
+      "embodied_survey_scene",
+    ),
+    true,
+  );
+  assert.equal(
+    constructed[1].config.mcp_servers.numen.enabled_tools.includes(
+      "survey_scene",
+    ),
+    false,
+  );
+  assert.match(
+    constructed[1].config.developer_instructions,
+    /你是游戏玩家桃桃/,
+  );
+  assert.match(
+    constructed[1].config.developer_instructions,
+    /embodied_plan_object/,
   );
 });
 
@@ -418,21 +471,330 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   );
 
   assert.equal(turns, 2);
-  assert.match(prompts[0], /你是游戏玩家桃桃/);
   assert.match(prompts[0], /"playerName":"Alex"/);
-  assert.match(prompts[0], /playerName and playerUuid/);
-  assert.match(prompts[0], /observe_volume/);
-  assert.match(prompts[0], /mine tool is resource gathering only/);
-  assert.match(prompts[0], /structure_plan once/);
-  assert.match(prompts[0], /material ledger/);
-  assert.match(prompts[0], /structure_execute/);
-  assert.match(prompts[0], /structure_patch/);
-  assert.match(prompts[0], /placement_feasibility/);
-  assert.match(prompts[0], /expected_revision/);
-  assert.match(prompts[0], /never resend its whole blueprint/);
-  assert.match(prompts[0], /saved coordinates/);
-  assert.match(prompts[0], /submit the concrete next action before send_chat/);
-  assert.match(prompts[0], /Only after an action tool has actually returned/);
+  assert.match(prompts[0], /Active goal capsule/);
+  assert.match(prompts[0], /"objective":"你好"/);
+  assert.match(prompts[0], /get_owner_status/);
+  assert.doesNotMatch(prompts[0], /你是游戏玩家桃桃/);
+  assert.doesNotMatch(prompts[0], /<autonomous_action_loop>/);
+});
+
+test("an accepted gameplay task gets a direct trusted ACK without a corrective turn", async () => {
+  let turns = 0;
+  const chats = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return acceptedTaskWithoutChatTurn(
+          "nnav-mcp-server-42",
+          "embodied_move_to",
+        );
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+    () => ({ revision: "static" }),
+    async (companion, message, receipt) => {
+      chats.push({ companion, message, receipt });
+    },
+  );
+
+  await brain.handle(
+    { id: 120, type: "player_chat", playerName: "Alex", message: "过来" },
+    { id: 120, route: "act", reason: "move request" },
+  );
+
+  assert.equal(turns, 1);
+  assert.equal(brain.hasAwaitingTask("nnav-mcp-server-42"), true);
+  assert.deepEqual(chats, [{
+    companion: "momo",
+    message: "好，我现在过去。",
+    receipt: {
+      kind: "accepted_task",
+      tool: "embodied_move_to",
+      taskId: "nnav-mcp-server-42",
+      actionId: "mcp-server-42",
+      message: "好，我现在过去。",
+    },
+  }]);
+});
+
+test("a generic synchronous verification still needs an agent chat turn", async () => {
+  let turns = 0;
+  const chats = [];
+  const responses = [
+    {
+      items: [{
+        type: "mcp_tool_call",
+        server: "numen",
+        tool: "structure_patch",
+        status: "completed",
+        result: {
+          structured_content: {
+            success: true,
+            data: {
+              async: false,
+              postcondition: { verified: true },
+            },
+          },
+          content: [],
+        },
+      }],
+    },
+    completedChatTurn(),
+  ];
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return responses.shift();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+    () => ({ revision: "static" }),
+    async (_companion, message) => {
+      chats.push(message);
+    },
+  );
+
+  await brain.handle(
+    {
+      id: 121,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "把方案修一下",
+    },
+    { id: 121, route: "act", reason: "patch request" },
+  );
+
+  assert.equal(turns, 2);
+  assert.deepEqual(chats, []);
+});
+
+test("accepted task correlation is bounded but does not expire by wall time", () => {
+  const brain = new MomoBrain(
+    () => ({ async run() { return completedChatTurn(); } }),
+    "momo",
+    "",
+    "supervised",
+  );
+
+  for (let index = 1; index <= 65; index += 1) {
+    brain.noteAcceptedTasks(
+      acceptedTaskWithoutChatTurn(`nnav-long-${index}`),
+    );
+  }
+
+  assert.equal(brain.awaitingTaskIds.size, 64);
+  assert.equal(brain.hasAwaitingTask("nnav-long-1", Number.MAX_VALUE), false);
+  assert.equal(brain.hasAwaitingTask("nnav-long-65", Number.MAX_VALUE), true);
+});
+
+test("a new active-work goal queues without contaminating the current goal", async () => {
+  let starts = 0;
+  const prompts = [[], []];
+  const trustedChats = [];
+  const brain = new MomoBrain(
+    () => {
+      const threadIndex = starts++;
+      let turns = 0;
+      return {
+        async run(prompt) {
+          prompts[threadIndex].push(prompt);
+          turns += 1;
+          if (threadIndex === 0 && turns === 1) {
+            return acceptedTaskWithoutChatTurn(
+              "nnav-active-goal",
+              "embodied_follow_owner",
+            );
+          }
+          return completedChatTurn();
+        },
+      };
+    },
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    async (_companion, message, receipt) => {
+      trustedChats.push({ message, kind: receipt.kind });
+    },
+  );
+
+  await brain.handle(
+    {
+      id: 201,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "跟着我",
+    },
+    {
+      id: 201,
+      route: "act",
+      reason: "follow",
+      continues_goal: false,
+    },
+  );
+  const queued = await brain.handle(
+    {
+      id: 202,
+      type: "player_chat",
+      playerName: "Steve",
+      playerUuid: "steve",
+      message: "去砍一棵树",
+    },
+    {
+      id: 202,
+      route: "act",
+      reason: "independent gathering request",
+      continues_goal: false,
+    },
+  );
+
+  assert.deepEqual(queued, { interrupted: false, queued: true });
+  assert.equal(starts, 1);
+  assert.equal(brain.activeGoal.objective, "跟着我");
+  assert.equal(brain.pendingPlayerGoals.length, 1);
+
+  await brain.handleTaskEvent({
+    id: 203,
+    type: "task_finished",
+    taskId: "nnav-active-goal",
+    taskName: "embodied_follow_owner",
+    status: "done",
+    message: "follow stopped",
+  });
+
+  assert.equal(starts, 2);
+  assert.equal(brain.pendingPlayerGoals.length, 0);
+  assert.equal(brain.activeGoal.objective, "去砍一棵树");
+  assert.match(prompts[1][0], /去砍一棵树/);
+  assert.doesNotMatch(prompts[1][0], /跟着我/);
+  assert.deepEqual(trustedChats.map((entry) => entry.kind), [
+    "accepted_task",
+    "queued_goal",
+  ]);
+});
+
+test("an explicit correction continues the active goal immediately", async () => {
+  let starts = 0;
+  const prompts = [];
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => {
+      starts += 1;
+      return {
+        async run(prompt) {
+          prompts.push(prompt);
+          turns += 1;
+          return turns === 1
+            ? acceptedTaskWithoutChatTurn("nnav-correction")
+            : completedChatTurn();
+        },
+      };
+    },
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    async () => {},
+  );
+
+  await brain.handle(
+    {
+      id: 211,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "去门口",
+    },
+    {
+      id: 211,
+      route: "act",
+      reason: "move",
+      continues_goal: false,
+    },
+  );
+  await brain.handle(
+    {
+      id: 212,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "你卡住了，换个办法",
+    },
+    {
+      id: 212,
+      route: "act",
+      reason: "current movement is stuck",
+      continues_goal: true,
+    },
+  );
+
+  assert.equal(starts, 1);
+  assert.equal(brain.pendingPlayerGoals.length, 0);
+  assert.equal(brain.activeGoal.objective, "去门口");
+  assert.equal(brain.activeGoal.latest_instruction, "你卡住了，换个办法");
+  assert.match(prompts[1], /"objective":"去门口"/);
+  assert.match(prompts[1], /"latest_instruction":"你卡住了，换个办法"/);
+});
+
+test("a fast reply capsule preserves one speaker's follow-up referent", async () => {
+  let prompt;
+  const brain = new MomoBrain(
+    () => ({
+      async run(value) {
+        prompt = value;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+  );
+  brain.noteFastReply(
+    {
+      id: 220,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "熔炉怎么合成？",
+    },
+    "八个圆石围一圈，中间留空。",
+  );
+  brain.noteFastReply(
+    {
+      id: 221,
+      type: "player_chat",
+      playerName: "Steve",
+      playerUuid: "steve",
+      message: "火把怎么合成？",
+    },
+    "煤炭或木炭放在木棍上方。",
+  );
+
+  await brain.handle(
+    {
+      id: 222,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "那你帮我做一个",
+    },
+    {
+      id: 222,
+      route: "act",
+      reason: "craft the previously discussed item",
+      continues_goal: false,
+    },
+  );
+
+  assert.match(prompt, /熔炉怎么合成/);
+  assert.match(prompt, /八个圆石围一圈/);
+  assert.doesNotMatch(prompt, /火把怎么合成/);
 });
 
 test("console chat never invents a human body or location", async () => {
@@ -462,7 +824,8 @@ test("console chat never invents a human body or location", async () => {
 
   assert.match(prompt, /authenticated server-console message/);
   assert.match(prompt, /has no human player body, UUID, gaze, or world position/);
-  assert.match(prompt, /relative to the companion's freshly observed position/);
+  assert.match(prompt, /get_self_status/);
+  assert.match(prompt, /embodied_survey_scene with anchor_mode=self/);
 });
 
 test("task completion returns to the persistent brain for verification", async () => {
@@ -781,7 +1144,7 @@ test("test continuation can deliberately reuse the current context", async () =>
   assert.match(prompts[1], /继续刚才的方案/);
 });
 
-test("repeated state mismatch trips the placement retry fuse despite goto", async () => {
+test("repeated state mismatch trips the placement retry fuse despite moving", async () => {
   const prompts = [];
   const brain = new MomoBrain(
     () => ({
@@ -813,7 +1176,7 @@ test("repeated state mismatch trips the placement retry fuse despite goto", asyn
     id: 22,
     type: "task_finished",
     taskId: "t22",
-    taskName: "goto",
+    taskName: "embodied_move_to",
     status: "done",
     message: "arrived",
   });
@@ -823,11 +1186,11 @@ test("repeated state mismatch trips the placement retry fuse despite goto", asyn
   assert.match(prompts[0], /structure_status/);
   assert.match(prompts[0], /placement_feasibility/);
   assert.match(prompts[0], /structure_patch/);
-  assert.match(prompts[0], /goto alone is not a changed approach/);
+  assert.match(prompts[0], /moving alone is not a changed approach/);
   assert.match(prompts[1], /"placement_failure":false/);
   assert.match(prompts[2], /"identical_failures":2/);
   assert.match(prompts[2], /"retry_allowed":false/);
-  assert.match(prompts[2], /do not start another unchanged goto\/build\/structure_execute/);
+  assert.match(prompts[2], /do not start another unchanged build or structure_execute/);
 });
 
 test("a changed requested state creates a new placement failure signature", () => {

@@ -6,6 +6,7 @@ import { createCodexRuntimes } from "./codex-brain.mjs";
 import { loadConfig } from "./config.mjs";
 import { EventInbox } from "./event-inbox.mjs";
 import { NumenMcpClient } from "./mcp-client.mjs";
+import { GAMEPLAY_ENABLED_TOOLS } from "./tool-capabilities.mjs";
 import {
   AgentModelSelectionStore,
   BrainConfigGateway,
@@ -52,31 +53,15 @@ export async function verifyMcp(client) {
   await client.initialize();
   const tools = await client.listTools();
   const names = new Set(tools.map((tool) => tool.name));
-  for (const required of [
+  const requiredTools = new Set([
     "list_companions",
     "poll_server_events",
     "poll_companion_events",
-    "send_chat",
     "run_command",
-    "task_stop",
-    "embodied_nav_status",
-    "embodied_nav_stop",
-    "follow_player",
-    "structure_plan",
-    "structure_status",
-    "structure_execute",
-    "structure_patch",
-    "placement_feasibility",
-    "survey_scene",
-    "inspect_object",
-    "observe_entity_intent",
-    "get_combat_trace",
-    "save_combat_policy",
-    "combat_policy_status",
-    "activate_combat_policy",
-    "abort_combat_policy",
     "report_brain_config_state",
-  ]) {
+    ...GAMEPLAY_ENABLED_TOOLS,
+  ]);
+  for (const required of requiredTools) {
     if (!names.has(required)) {
       throw new Error(
         `Numen MCP is missing ${required}; install the matching momo/server-agent numen-api build`,
@@ -114,6 +99,10 @@ export async function run({
     config,
     persona,
     modelSelection,
+    {
+      sendChat: (companion, message) =>
+        client.sendChat(companion, message),
+    },
   );
   const refreshGoalLease = async (reason) => {
     if (config.activityMode !== "supervised") return;
@@ -536,7 +525,22 @@ export async function run({
           reason: decision.reason,
         });
         try {
-          await brain.handle(event, decision);
+          if (
+            decision.route === "reply" &&
+            decision.fastReply === true &&
+            typeof decision.reply === "string" &&
+            decision.reply !== ""
+          ) {
+            await client.sendChat(config.companion, decision.reply);
+            brain.noteFastReply(event, decision.reply);
+            log("info", "low-cost chat reply sent directly", {
+              eventId: event.id,
+              player: event.playerName,
+              channel: event.type,
+            });
+          } else {
+            await brain.handle(event, decision);
+          }
         } catch (error) {
           log("error", "chat handling failed without stopping the poller", {
             eventId: event.id,

@@ -3,10 +3,14 @@
 This directory contains the private, event-driven process that connects Codex
 to the dedicated-server Numen MCP endpoint.
 
-Every human chat message enters a bounded server queue. A small Codex model
-classifies a batch as `ignore`, `reply`, or `act`; only `reply` and `act` wake
-the persistent gameplay agent. Player replies are sent through the companion
-body and appear to vanilla clients as ordinary `<momo> text` chat.
+Every human chat message enters a bounded server queue. Direct greetings and
+obvious addressed action requests take a deterministic fast path. The remaining
+messages are classified by a small Codex model as `ignore`, `reply`, or `act`;
+`reply` carries a short low-cost answer, while only `act` wakes the gameplay
+agent. All replies are sent through the companion body and appear to vanilla
+clients as ordinary `<momo> text` chat. A direct reply keeps only the same
+speaker's last two exchanges for five minutes, so a follow-up such as “那你帮我
+做一个” retains its referent without waking or polluting the gameplay thread.
 
 Dedicated-server console and RCON operators can use `momo chat <message>` as
 the same bounded conversation/action channel without joining the world.
@@ -114,15 +118,32 @@ node src/index.mjs --once
 
 The gameplay model is the planner. It observes the live world, chooses a small
 bounded action, lets the normal fake-player body execute it, then observes the
-task result and replans in the same persistent Codex thread. It is not limited
-to selecting one opaque task macro.
+task result and replans in the same goal-scoped Codex thread. Once supervised
+body work ends, that goal is released so the next goal starts clean; explicit
+test continuations and accepted background work retain their original objective
+and speaker identity. Explicit progress, stop, retry, stuck, and changed-approach
+messages continue the active goal. An independent request arriving during body
+work is kept in a bounded queue and starts in a fresh thread after the current
+terminal event, so two players' objectives cannot silently merge.
+
+Stable persona, safety, perception, construction, and combat rules live in
+Codex `developer_instructions` instead of being copied into every event prompt.
+The gameplay MCP server also uses an exact tool allowlist. Sidecar polling,
+lifecycle, server-command, duplicate legacy perception, and legacy `goto`
+tools are therefore absent from model context.
 
 The low-level surface includes:
 
-- `survey_scene` for a compact server-derived scene graph with stable ids for
+- `embodied_survey_scene` for a compact server-derived scene graph with stable ids for
   trees, building candidates, entrances, pits/depressions, and ground rises;
-- `inspect_object` for the chosen object's compact exact geometry, current
+- `embodied_inspect_object` for the chosen object's compact exact geometry, current
   material histogram, relations, provenance confidence, and protection policy;
+- `embodied_plan_object` for freezing one editable semantic role without
+  transcribing its cells;
+- `embodied_plan_region`, `embodied_execute_plan`, status/cancel, and undo
+  tools for bounded reversible multi-cell terrain work;
+- `embodied_move_to` and `embodied_follow_owner` for native land navigation,
+  with legacy `follow_player` retained only for a non-owner target;
 - `observe_volume` for a precise, bounded 3D block snapshot;
 - `break_block` for one visible cell guarded by its freshly observed block id;
 - `build` for an explicit list of placements or `minecraft:air` removals;
@@ -140,11 +161,12 @@ The low-level surface includes:
 agent is explicitly forbidden from using it to demolish or edit structures.
 Unfamiliar destructive edits run in small verified checkpoints.
 
-The planner now uses semantic perception in layers: `survey_scene` finds and
-names bounded objects, `inspect_object` expands only the selected id, and
-`observe_volume` is reserved for exact cavities or block states. Old chunks do
-not contain a trustworthy per-block creator ledger, so likely player-made
-structures are explicitly marked as an inference and protected by default.
+The planner now uses semantic perception in layers: `embodied_survey_scene`
+finds and names bounded objects, `embodied_inspect_object` expands only the
+selected id, and `observe_volume` is reserved for exact cavities or block
+states. Old chunks do not contain a trustworthy per-block creator ledger, so
+likely player-made structures are explicitly marked as an inference and
+protected by default.
 
 Larger construction goals use a persisted workflow:
 
@@ -190,11 +212,19 @@ Server chat polling runs independently from Codex turns. A direct stop phrase
 aborts the current SDK turn, cancels stale queued action chat, and calls
 `task_stop` on the companion body before acknowledging the player.
 
-At startup the sidecar verifies that the server exposes the complete workflow
-surface: `structure_plan`, `structure_status`, `structure_execute`,
-`structure_patch`, and `placement_feasibility`, plus combat observation and
-policy tools. A mismatched old mod therefore fails visibly instead of starting
-with a recovery path it cannot execute.
+At startup the sidecar verifies that the server exposes native movement and
+owner follow, the Momo Embodied semantic/region workflow, the persistent Numen
+structure workflow, and the combat observation/policy surface. A mismatched old
+mod therefore fails visibly instead of starting with a recovery path it cannot
+execute.
+
+Async tools return a common `task_id`, `action_id`, and `async=true` receipt.
+The same `task_id` is published in `task_finished`. The Harness registers only
+strict successful receipts and may send a fixed player-visible acknowledgement
+without spending a second gameplay-model turn; plain `success=true` text never
+authorizes such an acknowledgement. Accepted IDs are retained by exact identity
+until their terminal event (with a 64-entry bound), rather than expiring while a
+long follow or construction job is still valid.
 
 ## Experience policy
 
@@ -206,7 +236,7 @@ skills only verify their final postconditions; any failure demotes them.
 This is deliberately different from generating a new MCP server for every
 success:
 
-- MCP tools are stable capabilities such as `goto`, `auto_mine`, and
+- MCP tools are stable capabilities such as `embodied_move_to`, `mine`, and
   `get_player_status`.
 - Skills are parameterized workflows composed from those tools.
 - A future generic `run_skill` MCP tool executes a stored workflow.
