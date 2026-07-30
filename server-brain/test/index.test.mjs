@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { verifyMcp } from "../src/index.mjs";
+import {
+  shouldReplayTransportForCompanion,
+  shouldReplayTransportEvent,
+  verifyMcp,
+} from "../src/index.mjs";
 import { GAMEPLAY_ENABLED_TOOLS } from "../src/tool-capabilities.mjs";
 
 const required = [...new Set([
@@ -76,4 +80,71 @@ test("MCP verification requires Embodied, blueprint, and combat tools", async ()
     /missing save_combat_policy/,
   );
   await verifyMcp(client(required));
+});
+
+test("old-session gameplay is quarantined while server-wide config survives", () => {
+  assert.equal(
+    shouldReplayTransportEvent(
+      {
+        id: 1,
+        type: "player_chat",
+        message: "momo stop",
+        serverSessionId: "session-a",
+      },
+      "session-b",
+    ),
+    false,
+  );
+  assert.equal(
+    shouldReplayTransportEvent(
+      {
+        id: 2,
+        type: "brain_config_request",
+        serverSessionId: "session-a",
+        data: {
+          requestId: "request-2",
+          action: "get",
+          expiresAtEpochMillis: Date.now() + 30_000,
+          requester: { kind: "console", name: "console" },
+        },
+      },
+      "session-b",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldReplayTransportEvent(
+      { id: 3, type: "player_chat", message: "legacy event" },
+      "session-b",
+    ),
+    false,
+  );
+});
+
+test("transport owner mismatch retains only server-wide configuration", () => {
+  const stop = {
+    id: 4,
+    type: "console_chat",
+    message: "momo stop",
+    serverSessionId: "session-b",
+  };
+  const config = {
+    id: 5,
+    type: "brain_config_request",
+    data: {
+      requestId: "request-5",
+      action: "get",
+      expiresAtEpochMillis: Date.now() + 30_000,
+      requester: { kind: "console", name: "console" },
+    },
+  };
+
+  assert.equal(
+    shouldReplayTransportForCompanion(stop, "momo-old", "momo"),
+    false,
+  );
+  assert.equal(
+    shouldReplayTransportForCompanion(config, "momo-old", "momo"),
+    true,
+  );
 });

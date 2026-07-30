@@ -12,7 +12,7 @@ description = '''${description}''' #mandatory (Supports multiline text)
 [[dependencies.${mod_id}]] #optional
 modId = "numen_api" #mandatory — core supplies tools to the numen-api engine
 mandatory = true #mandatory
-versionRange = "[0.0,)" #mandatory
+versionRange = "${numen_api_version_range}" #mandatory
 ordering = "AFTER" # load after the engine so its registries exist
 side = "BOTH"
 [[dependencies.${mod_id}]] #optional

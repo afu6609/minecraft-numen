@@ -21,21 +21,33 @@ const SAMPLE = {
     "an axe or an empty hand is available",
     "at least one reachable tree is nearby",
   ],
+  precondition_verifiers: [
+    { type: "body_idle" },
+    { type: "health_at_least", value: 10 },
+  ],
   steps: [
     {
-      tool: "scan_blocks",
-      args: { tag: "${log_tag}", radius: 24 },
+      tool: "embodied_survey_scene",
+      args: { anchor_mode: "self", radius: 24 },
       expect: "at least one reachable trunk is returned",
+      verifiers: [{ type: "tool_success" }],
     },
     {
-      tool: "auto_mine",
-      args: { block: "${selected_log}", count: 1 },
+      tool: "mine",
+      args: { block: "${log_tag}", count: 1 },
       expect: "the trunk is harvested and drops are collected",
+      verifiers: [
+        { type: "tool_success" },
+        { type: "task_terminal_done" },
+      ],
     },
   ],
   postconditions: [
     "the harvested log count increased",
     "a sapling occupies a valid replacement position",
+  ],
+  postcondition_verifiers: [
+    { type: "inventory_delta", item: "${log_tag}", minimum: 1 },
   ],
   recovery: [
     "if no sapling dropped, report that replanting could not be completed",
@@ -65,10 +77,17 @@ test("three clean successes promote a candidate", async (t) => {
 
   const store = new ExperienceStore(root);
   await store.saveCandidate(SAMPLE);
-  await store.recordValidation(SAMPLE.id, { success: true, evidence: "spruce biome" });
+  const second = await store.recordValidation(SAMPLE.id, {
+    success: true,
+    evidence: "spruce biome",
+    executionId: "execution-spruce",
+    expectedVersion: 1,
+  });
   const skill = await store.recordValidation(SAMPLE.id, {
     success: true,
     evidence: "oak forest",
+    executionId: "execution-oak",
+    expectedVersion: second.version,
   });
 
   assert.equal(skill.status, "trusted");
@@ -82,16 +101,25 @@ test("a failure demotes and records repair evidence", async (t) => {
 
   const store = new ExperienceStore(root);
   await store.saveCandidate(SAMPLE);
-  await store.recordValidation(SAMPLE.id, { success: true, evidence: "spruce biome" });
+  const second = await store.recordValidation(SAMPLE.id, {
+    success: true,
+    evidence: "spruce biome",
+    executionId: "execution-spruce",
+    expectedVersion: 1,
+  });
   const trusted = await store.recordValidation(SAMPLE.id, {
     success: true,
     evidence: "oak forest",
+    executionId: "execution-oak",
+    expectedVersion: second.version,
   });
   assert.equal(trusted.status, "trusted");
 
   const skill = await store.recordValidation(SAMPLE.id, {
     success: false,
     evidence: "2x2 jungle trunk needs a different traversal plan",
+    executionId: "execution-jungle",
+    expectedVersion: trusted.version,
   });
 
   assert.equal(skill.status, "candidate");
@@ -107,5 +135,71 @@ test("unsafe ids and malformed steps are rejected", () => {
   assert.throws(
     () => normalizeSkill({ ...SAMPLE, steps: [] }),
     /at least one/,
+  );
+  assert.throws(
+    () =>
+      normalizeSkill({
+        ...SAMPLE,
+        steps: [{
+          tool: "run_command",
+          args: { command: "op momo" },
+          expect: "command ran",
+          verifiers: [{ type: "tool_success" }],
+        }],
+      }),
+    /not allowed/,
+  );
+});
+
+test("candidate creation cannot overwrite a trusted or existing skill", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "momo-experience-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new ExperienceStore(root);
+  await store.saveCandidate(SAMPLE);
+
+  await assert.rejects(store.saveCandidate(SAMPLE), (error) => error.code === "EEXIST");
+  const revised = await store.saveRevision("chop_and_replant", 1, {
+    ...SAMPLE,
+    description: "A revised guarded harvesting workflow.",
+  });
+  assert.equal(revised.version, 2);
+  assert.equal(revised.status, "candidate");
+  await assert.rejects(
+    store.saveRevision("chop_and_replant", 1, SAMPLE),
+    /revision conflict/,
+  );
+});
+
+test("validation commits are idempotent and pinned to the executed version", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "momo-experience-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new ExperienceStore(root);
+  await store.saveCandidate(SAMPLE);
+
+  const validation = {
+    success: true,
+    evidence: "same completed macro replayed after restart",
+    executionId: "skill-execution-7",
+    expectedVersion: 1,
+  };
+  const [first, replay] = await Promise.all([
+    store.recordValidation(SAMPLE.id, validation),
+    store.recordValidation(SAMPLE.id, validation),
+  ]);
+
+  assert.equal(first.version, 2);
+  assert.equal(replay.version, 2);
+  assert.equal(replay.validations.successes, 2);
+  assert.deepEqual(replay.validations.execution_results, [
+    { id: "skill-execution-7", success: true },
+  ]);
+  await assert.rejects(
+    store.recordValidation(SAMPLE.id, {
+      success: true,
+      evidence: "a different execution cannot validate an obsolete definition",
+      executionId: "skill-execution-8",
+      expectedVersion: 1,
+    }),
+    /definition changed during execution/,
   );
 });

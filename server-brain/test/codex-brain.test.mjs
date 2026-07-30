@@ -20,7 +20,10 @@ function completedChatTurn() {
 function completedAsyncTaskTurn(
   taskId,
   tool = "craft",
-  { structured = false } = {},
+  {
+    structured = false,
+    serverSessionId = "server-session-1",
+  } = {},
 ) {
   const payload = {
     success: true,
@@ -28,6 +31,7 @@ function completedAsyncTaskTurn(
     data: {
       async: true,
       task_id: taskId,
+      server_session_id: serverSessionId,
       task: tool,
     },
   };
@@ -52,7 +56,11 @@ function completedAsyncTaskTurn(
   };
 }
 
-function acceptedTaskWithoutChatTurn(taskId, tool = "craft") {
+function acceptedTaskWithoutChatTurn(
+  taskId,
+  tool = "craft",
+  { serverSessionId = "server-session-1" } = {},
+) {
   return {
     items: [{
       id: `call-${taskId}`,
@@ -71,6 +79,7 @@ function acceptedTaskWithoutChatTurn(taskId, tool = "craft") {
               async: true,
               task_id: taskId,
               action_id: "mcp-server-42",
+              server_session_id: serverSessionId,
               task: tool,
             },
           }),
@@ -156,11 +165,17 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
     ),
     false,
   );
+  assert.equal(
+    constructed[1].config.mcp_servers.numen.enabled_tools.includes(
+      "structure_plan",
+    ),
+    false,
+  );
   assert.match(
     constructed[1].config.developer_instructions,
     /你是游戏玩家桃桃/,
   );
-  assert.match(
+  assert.doesNotMatch(
     constructed[1].config.developer_instructions,
     /embodied_plan_object/,
   );
@@ -182,8 +197,8 @@ test("model revision waits for the next logical event and resumes context", asyn
   let oldRuns = 0;
 
   class FakeCodex {
-    constructor() {
-      this.agent = starts.length === 0 && FakeCodex.instances++ === 1;
+    constructor(options) {
+      this.agent = options?.config?.mcp_servers != null;
     }
 
     startThread(options) {
@@ -215,8 +230,6 @@ test("model revision waits for the next logical event and resumes context", asyn
         },
       };
     }
-
-    static instances = 0;
   }
 
   const { brain } = createCodexRuntimes(
@@ -271,7 +284,7 @@ test("model revision waits for the next logical event and resumes context", asyn
   assert.equal(resumes[0].options.modelReasoningEffort, "high");
 });
 
-test("missing resumed rollout retries the same prompt once on a new thread", async () => {
+test("missing resumed rollout prepares a new thread without replaying the prompt", async () => {
   let selection = {
     model: "gpt-5.6-luna",
     reasoning: "high",
@@ -283,8 +296,8 @@ test("missing resumed rollout retries the same prompt once on a new thread", asy
   const fallbackPrompts = [];
 
   class FakeCodex {
-    constructor() {
-      this.agent = FakeCodex.instances++ === 1;
+    constructor(options) {
+      this.agent = options?.config?.mcp_servers != null;
     }
 
     startThread(options) {
@@ -310,8 +323,6 @@ test("missing resumed rollout retries the same prompt once on a new thread", asy
         },
       };
     }
-
-    static instances = 0;
   }
 
   const { brain } = createCodexRuntimes(
@@ -345,9 +356,12 @@ test("missing resumed rollout retries the same prompt once on a new thread", asy
     reasoning: "medium",
     revision: "2",
   };
-  await brain.handle(
-    { id: 2, playerName: "Alex", message: "继续" },
-    { id: 2, route: "reply", reason: "follow-up" },
+  await assert.rejects(
+    brain.handle(
+      { id: 2, playerName: "Alex", message: "继续" },
+      { id: 2, route: "reply", reason: "follow-up" },
+    ),
+    /unresolved turn was not replayed/iu,
   );
 
   assert.equal(resumes.length, 1);
@@ -355,7 +369,9 @@ test("missing resumed rollout retries the same prompt once on a new thread", asy
   assert.equal(starts.length, 2);
   assert.equal(starts[1].options, resumes[0].options);
   assert.equal(starts[1].options.model, "gpt-5.3-codex-spark");
-  assert.deepEqual(fallbackPrompts, resumedPrompts);
+  assert.equal(resumedPrompts.length, 1);
+  assert.deepEqual(fallbackPrompts, []);
+  assert.equal(brain.turnInFlight?.status, "interrupted_unresolved");
 });
 
 test("ordinary first resumed-turn failures are never retried", async () => {
@@ -368,8 +384,8 @@ test("ordinary first resumed-turn failures are never retried", async () => {
   let resumes = 0;
 
   class FakeCodex {
-    constructor() {
-      this.agent = FakeCodex.instances++ === 1;
+    constructor(options) {
+      this.agent = options?.config?.mcp_servers != null;
     }
 
     startThread() {
@@ -392,8 +408,6 @@ test("ordinary first resumed-turn failures are never retried", async () => {
         },
       };
     }
-
-    static instances = 0;
   }
 
   const { brain } = createCodexRuntimes(
@@ -596,7 +610,7 @@ test("accepted task correlation is bounded but does not expire by wall time", ()
 
 test("a new active-work goal queues without contaminating the current goal", async () => {
   let starts = 0;
-  const prompts = [[], []];
+  const prompts = [[], [], []];
   const trustedChats = [];
   const brain = new MomoBrain(
     () => {
@@ -638,6 +652,7 @@ test("a new active-work goal queues without contaminating the current goal", asy
       route: "act",
       reason: "follow",
       continues_goal: false,
+      capability_hint: "orient",
     },
   );
   const queued = await brain.handle(
@@ -653,6 +668,7 @@ test("a new active-work goal queues without contaminating the current goal", asy
       route: "act",
       reason: "independent gathering request",
       continues_goal: false,
+      capability_hint: "gather",
     },
   );
 
@@ -1468,7 +1484,7 @@ test("defense interruption defers player chat until defense finishes", async () 
   assert.match(prompts[1], /do not submit a duplicate/);
 });
 
-test("death keeps one deduplicated deferred goal until the body is available", async () => {
+test("death keeps an interrupted player turn sealed until read-only recovery", async () => {
   let turns = 0;
   let blockTurns = true;
   let onTurnStarted = null;
@@ -1517,7 +1533,10 @@ test("death keeps one deduplicated deferred goal until the body is available", a
   }
 
   await interruptSameChat();
-  await interruptSameChat();
+  assert.deepEqual(await brain.handle(event, decision), {
+    interrupted: false,
+    deduplicated: true,
+  });
   brain.noteBodyEvent({
     id: "body-52-death",
     type: "death",
@@ -1525,7 +1544,7 @@ test("death keeps one deduplicated deferred goal until the body is available", a
 
   // A death event is buffered only; unavailable-body telemetry must not spin
   // up immediate model retries.
-  assert.equal(turns, 2);
+  assert.equal(turns, 1);
 
   blockTurns = false;
   onTurnStarted = null;
@@ -1534,13 +1553,15 @@ test("death keeps one deduplicated deferred goal until the body is available", a
     type: "body_available",
   });
 
-  assert.equal(turns, 3);
+  assert.equal(turns, 2);
   assert.equal(
-    prompts[2].match(/DEATH_DEFERRED_GO_HOME_ONCE/g)?.length,
+    prompts[1].match(/DEATH_DEFERRED_GO_HOME_ONCE/g)?.length,
     1,
   );
-  assert.match(prompts[2], /"body-52-death"/);
-  assert.match(prompts[2], /"body-52-available"/);
+  assert.match(prompts[1], /"body-52-death"/);
+  assert.match(prompts[1], /"body-52-available"/);
+  assert.match(prompts[1], /never replay/);
+  assert.equal(brain.threadProfile, "reconcile");
 });
 
 test("body recovery consumes deferred player goals one per acknowledged turn", async () => {
@@ -1594,7 +1615,7 @@ test("body recovery consumes deferred player goals one per acknowledged turn", a
   assert.equal(brain.pendingPlayerGoals.length, 0);
 });
 
-test("unacknowledged deferred player goal remains queued for retry", async () => {
+test("unacknowledged completed recovery becomes read-only reconciliation", async () => {
   let acknowledge = false;
   const prompts = [];
   const brain = new MomoBrain(
@@ -1626,13 +1647,18 @@ test("unacknowledged deferred player goal remains queued for retry", async () =>
     /without calling send_chat/,
   );
   assert.equal(prompts.length, 2);
-  assert.equal(brain.pendingPlayerGoals.length, 1);
+  assert.equal(brain.pendingPlayerGoals.length, 0);
+  assert.equal(
+    brain.pendingTaskEvents[0].event.status,
+    "unknown_after_restart",
+  );
 
   acknowledge = true;
   assert.deepEqual(await brain.retryBodyContext(), { interrupted: false });
   assert.equal(prompts.length, 3);
   assert.match(prompts[2], /RETRY_DEFERRED_GOAL/);
-  assert.match(prompts[2], /"body-unacknowledged-goal"/);
+  assert.match(prompts[2], /never replay/);
+  assert.equal(brain.threadProfile, "reconcile");
   assert.equal(brain.pendingPlayerGoals.length, 0);
 });
 
@@ -1688,12 +1714,12 @@ test("an interrupted task failure is carried into body recovery", async () => {
 
   assert.equal(turns, 2);
   assert.match(prompts[1], /Interrupted task events/);
-  assert.match(prompts[1], /"taskId":"t31"/);
-  assert.match(prompts[1], /placement_feasibility/);
-  assert.match(prompts[1], /structure_patch/);
+  assert.match(prompts[1], /"relatedTaskIds":\["t31"\]/);
+  assert.match(prompts[1], /never replay/);
+  assert.equal(brain.threadProfile, "reconcile");
 });
 
-test("a direct stop does not revive an interrupted task later", async () => {
+test("a direct stop only read-only reconciles an interrupted task later", async () => {
   let turns = 0;
   let started;
   const entered = new Promise((resolve) => {
@@ -1736,7 +1762,9 @@ test("a direct stop does not revive an interrupted task later", async () => {
   await brain.handleBodyEvent({ id: "body-41", type: "body_available" });
 
   assert.equal(turns, 2);
-  assert.doesNotMatch(prompts[1], /must-not-revive/);
+  assert.match(prompts[1], /"relatedTaskIds":\["must-not-revive"\]/);
+  assert.match(prompts[1], /never replay/);
+  assert.equal(brain.threadProfile, "reconcile");
 });
 
 test("interrupting the chat-only follow-up does not replay a handled task", async () => {
@@ -1785,5 +1813,756 @@ test("interrupting the chat-only follow-up does not replay a handled task", asyn
   await brain.handleBodyEvent({ id: "body-42", type: "body_available" });
 
   assert.equal(turns, 3);
-  assert.doesNotMatch(prompts[2], /already-handled/);
+  assert.match(prompts[2], /"relatedTaskIds":\["already-handled"\]/);
+  assert.match(prompts[2], /never replay/);
+  assert.equal(brain.threadProfile, "reconcile");
+});
+
+test("a failed completed checkpoint keeps the original turn identity unresolved", async () => {
+  let durableFlushes = 0;
+  const checkpoints = [];
+  const brain = new MomoBrain(
+    () => ({
+      id: "checkpoint-thread",
+      async run() {
+        const started = checkpoints.at(-1);
+        assert.equal(started.reason, "turn_started");
+        assert.equal(
+          started.snapshot.turn_in_flight.source_event_key,
+          "player_chat:event:701",
+        );
+        return completedAsyncTaskTurn("task-checkpoint", "mine", {
+          serverSessionId: "session-checkpoint",
+        });
+      },
+    }),
+    "momo",
+    "",
+    "autonomous",
+    () => ({ revision: "static" }),
+    null,
+    {
+      onStateChange(snapshot, reason) {
+        checkpoints.push({
+          reason,
+          snapshot: structuredClone(snapshot),
+        });
+      },
+      async durableCheckpoint() {
+        durableFlushes += 1;
+        if (durableFlushes === 2) {
+          throw new Error("turn_completed flush failed");
+        }
+      },
+    },
+  );
+  brain.reconcileLiveState({
+    serverSessionId: "session-checkpoint",
+    activeTaskIds: [],
+  });
+
+  await assert.rejects(
+    brain.handle(
+      {
+        id: 701,
+        type: "player_chat",
+        playerName: "Alex",
+        message: "挖一块石头",
+      },
+      {
+        id: 701,
+        route: "act",
+        reason: "mine",
+        capability_hint: "gather",
+      },
+    ),
+    /turn_completed flush failed/,
+  );
+
+  const state = brain.exportState();
+  assert.equal(state.turn_in_flight.status, "interrupted_unresolved");
+  assert.equal(
+    state.turn_in_flight.source_event_key,
+    "player_chat:event:701",
+  );
+  assert.match(state.turn_in_flight.turn_id, /^turn-/u);
+  assert.equal(state.awaiting_tasks[0].taskId, "task-checkpoint");
+  assert.equal(
+    state.handled_input_keys.find(
+      (entry) => entry.key === "player_chat:event:701",
+    )?.acceptedTask,
+    "task-checkpoint",
+  );
+});
+
+test("recovery turn commit atomically closes its turn and completed batch", async () => {
+  const checkpoints = [];
+  const brain = new MomoBrain(
+    () => ({
+      id: "recovery-commit-thread",
+      async run() {
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "",
+    "autonomous",
+    () => ({ revision: "static" }),
+    null,
+    {
+      onStateChange(snapshot, reason) {
+        checkpoints.push({
+          reason,
+          snapshot: structuredClone(snapshot),
+        });
+      },
+      async durableCheckpoint() {},
+    },
+  );
+  brain.noteBodyEvent({
+    id: "recovery-commit-body",
+    type: "body_available",
+  });
+  assert.deepEqual(await brain.retryBodyContext(), { interrupted: false });
+
+  const committed = checkpoints
+    .filter(
+      (entry) =>
+        entry.reason === "turn_completed" &&
+        entry.snapshot.active_recovery_batch?.stage === "turn_completed",
+    )
+    .at(-1)?.snapshot;
+  assert.ok(committed);
+  assert.equal(committed.turn_in_flight, null);
+  assert.match(committed.active_recovery_batch.turn_id, /^turn-/u);
+
+  let replayedTurns = 0;
+  const restored = new MomoBrain(
+    () => ({
+      async run() {
+        replayedTurns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "",
+    "autonomous",
+    () => ({ revision: "static" }),
+    null,
+    { restoredState: committed },
+  );
+  assert.equal(restored.pendingBodyEvents.length, 0);
+  assert.equal(restored.pendingTaskEvents.length, 0);
+  assert.equal(restored.pendingPlayerGoals.length, 0);
+  assert.deepEqual(await restored.retryBodyContext(), {
+    interrupted: false,
+    empty: true,
+  });
+  assert.equal(replayedTurns, 0);
+});
+
+test("an unresolved crashed action is sealed and never replayed after restart", async () => {
+  let attemptedTurns = 0;
+  const event = {
+    id: 702,
+    type: "player_chat",
+    playerName: "Alex",
+    playerUuid: "alex",
+    message: "砍这棵树",
+  };
+  const decision = {
+    id: 702,
+    route: "act",
+    reason: "gather wood",
+    capability_hint: "gather",
+  };
+  const original = new MomoBrain(
+    () => ({
+      id: "crashed-thread",
+      async run() {
+        attemptedTurns += 1;
+        throw new Error("transport lost after an unknown side effect");
+      },
+    }),
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    null,
+    { async durableCheckpoint() {} },
+  );
+  original.reconcileLiveState({
+    serverSessionId: "session-crash",
+    activeTaskIds: [],
+  });
+  await assert.rejects(
+    original.handle(event, decision),
+    /unknown side effect/,
+  );
+  const crashedState = original.exportState();
+  assert.equal(
+    crashedState.turn_in_flight.source_event_key,
+    "player_chat:event:702",
+  );
+
+  let recoveryTurns = 0;
+  const recoveryProfiles = [];
+  const recoveryPrompts = [];
+  const duplicateChats = [];
+  const restored = new MomoBrain(
+    (_selection, _previousThreadId, profile) => {
+      recoveryProfiles.push(profile);
+      return {
+        async run(prompt) {
+          recoveryTurns += 1;
+          recoveryPrompts.push(prompt);
+          return completedChatTurn();
+        },
+      };
+    },
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    async (_companion, message, receipt) => {
+      duplicateChats.push({ message, receipt });
+    },
+    {
+      restoredState: crashedState,
+      async durableCheckpoint() {},
+    },
+  );
+  restored.reconcileLiveState({
+    serverSessionId: "session-crash",
+    activeTaskIds: [],
+  });
+
+  assert.deepEqual(await restored.handle(event, decision), {
+    interrupted: false,
+    deduplicated: true,
+  });
+  assert.equal(recoveryTurns, 0);
+  assert.equal(duplicateChats[0].receipt.kind, "deduplicated_input");
+  assert.deepEqual(
+    await restored.handleTaskEvent({
+      id: 703,
+      type: "task_finished",
+      taskId: "unrelated-task",
+      taskName: "mine",
+      status: "done",
+    }),
+    { interrupted: false, held: true },
+  );
+  assert.equal(recoveryTurns, 0);
+
+  assert.deepEqual(await restored.retryBodyContext(), {
+    interrupted: false,
+  });
+  assert.equal(recoveryTurns, 1);
+  assert.equal(recoveryProfiles[0], "reconcile");
+  assert.match(recoveryPrompts[0], /never replay/);
+  assert.equal(attemptedTurns, 1);
+});
+
+test("server session change invalidates even a colliding live task id", () => {
+  const restoredState = {
+    snapshot_version: 1,
+    companion: "momo",
+    server_session_id: "minecraft-session-a",
+    active_profile: "gather",
+    awaiting_tasks: [{
+      taskId: "task-from-old-jvm",
+      tool: "mine",
+      profile: "gather",
+      sourceEventKey: "player_chat:event:704",
+      acceptedAt: Date.now(),
+    }],
+  };
+  const sameSession = new MomoBrain(
+    () => ({ async run() { return completedChatTurn(); } }),
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    null,
+    { restoredState },
+  );
+  assert.deepEqual(
+    sameSession.reconcileLiveState({
+      serverSessionId: "minecraft-session-a",
+      activeTaskIds: ["task-from-old-jvm"],
+    }),
+    {
+      activeTaskIds: ["task-from-old-jvm"],
+      missingTaskIds: [],
+      recoveryNeeded: false,
+    },
+  );
+  assert.equal(sameSession.hasAwaitingTask("task-from-old-jvm"), true);
+
+  const changedSession = new MomoBrain(
+    () => ({ async run() { return completedChatTurn(); } }),
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    null,
+    { restoredState },
+  );
+  const reconciled = changedSession.reconcileLiveState(
+    {
+      serverSessionId: "minecraft-session-b",
+      // A new JVM may reuse a compatibility-layer id. It must not revive the
+      // old receipt even if both live status and a queued event collide.
+      activeTaskIds: ["task-from-old-jvm"],
+    },
+    { pendingTaskIds: ["task-from-old-jvm"] },
+  );
+  assert.deepEqual(reconciled, {
+    activeTaskIds: [],
+    missingTaskIds: ["task-from-old-jvm"],
+    recoveryNeeded: true,
+  });
+  assert.equal(changedSession.hasAwaitingTask("task-from-old-jvm"), false);
+  assert.equal(
+    changedSession.pendingTaskEvents[0].event.status,
+    "unknown_after_restart",
+  );
+  assert.match(
+    changedSession.pendingTaskEvents[0].event.message,
+    /server session changed/iu,
+  );
+  assert.equal(
+    changedSession.pendingTaskEvents[0].recovery.retry_allowed,
+    false,
+  );
+});
+
+test("a restored old-session terminal cannot move the Brain session backward", async () => {
+  const brain = new MomoBrain(
+    () => ({ async run() { return completedChatTurn(); } }),
+    "momo",
+    "",
+    "supervised",
+  );
+  brain.synchronizeServerSession("minecraft-session-b");
+  brain.noteAcceptedTasks(
+    acceptedTaskWithoutChatTurn("colliding-task", "mine", {
+      serverSessionId: "minecraft-session-b",
+    }),
+  );
+
+  assert.deepEqual(
+    await brain.handleTaskEvent({
+      id: 1,
+      type: "task_finished",
+      taskId: "colliding-task",
+      taskName: "mine",
+      status: "done",
+      serverSessionId: "minecraft-session-a",
+    }),
+    {
+      interrupted: false,
+      held: true,
+      staleServerSession: true,
+    },
+  );
+  assert.equal(brain.serverSessionId, "minecraft-session-b");
+  assert.equal(brain.hasAwaitingTask("colliding-task"), true);
+});
+
+test("runtime task status invalidates old receipts before registering new-session actions", async () => {
+  function acceptedWithAction(taskId, actionId, serverSessionId) {
+    const turn = acceptedTaskWithoutChatTurn(taskId, "mine", {
+      serverSessionId,
+    });
+    const payload = JSON.parse(turn.items[0].result.content[0].text);
+    payload.data.action_id = actionId;
+    turn.items[0].result.content[0].text = JSON.stringify(payload);
+    return turn;
+  }
+
+  const newAction = acceptedWithAction(
+    "runtime-collision",
+    "new-session-action",
+    "runtime-session-b",
+  );
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        return {
+          items: [
+            {
+              type: "mcp_tool_call",
+              server: "numen",
+              tool: "task_status",
+              status: "completed",
+              result: {
+                structured_content: {
+                  success: true,
+                  data: {
+                    state: "idle",
+                    server_session_id: "runtime-session-b",
+                  },
+                },
+                content: [],
+              },
+            },
+            ...newAction.items,
+            ...completedChatTurn().items,
+          ],
+        };
+      },
+    }),
+    "momo",
+    "",
+    "supervised",
+  );
+  assert.throws(
+    () => brain.synchronizeServerSession("  "),
+    /non-empty string/,
+  );
+  assert.deepEqual(
+    brain.synchronizeServerSession("runtime-session-a"),
+    { changed: true, invalidatedTaskIds: [] },
+  );
+  brain.noteAcceptedTasks(
+    acceptedWithAction(
+      "runtime-collision",
+      "old-session-action",
+      "runtime-session-a",
+    ),
+  );
+  brain.contextCapsule.noteTurn({
+    items: [{
+      type: "mcp_tool_call",
+      server: "numen",
+      tool: "get_self_status",
+      status: "completed",
+      result: {
+        structured_content: {
+          success: true,
+          data: {
+            dimension: "old-session-world-marker",
+            hp: 20,
+          },
+        },
+        content: [],
+      },
+    }],
+  });
+
+  await brain.handle(
+    {
+      id: 708,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "重新确认后继续",
+    },
+    {
+      id: 708,
+      route: "act",
+      reason: "continue in current world",
+      capability_hint: "gather",
+    },
+  );
+
+  assert.equal(brain.serverSessionId, "runtime-session-b");
+  assert.equal(
+    brain.awaitingTaskIds.get("runtime-collision")?.actionId,
+    "new-session-action",
+  );
+  assert.deepEqual(
+    brain.pendingTaskEvents[0].event.relatedTaskIds,
+    ["runtime-collision"],
+  );
+  assert.equal(
+    brain.pendingTaskEvents[0].event.invalidatedReceipts[0].actionId,
+    "old-session-action",
+  );
+  assert.equal(
+    brain.pendingTaskEvents[0].event.status,
+    "unknown_after_restart",
+  );
+  assert.equal(
+    brain.pendingTaskEvents[0].recovery.retry_allowed,
+    false,
+  );
+  const sessionCapsule = JSON.stringify(
+    brain.exportState().context_capsule,
+  );
+  assert.doesNotMatch(sessionCapsule, /old-session-world-marker/);
+  assert.match(sessionCapsule, /runtime-session-b/);
+  assert.match(sessionCapsule, /new-session-action/);
+  assert.equal(brain.exportState().thread_id, null);
+});
+
+test("a delayed old receipt cannot override a later live task status", async () => {
+  const oldReceipt = acceptedTaskWithoutChatTurn(
+    "task-from-dead-session",
+    "mine",
+    { serverSessionId: "runtime-session-a" },
+  );
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        return {
+          items: [
+            ...oldReceipt.items,
+            {
+              type: "mcp_tool_call",
+              server: "numen",
+              tool: "task_status",
+              status: "completed",
+              result: {
+                structured_content: {
+                  success: true,
+                  data: {
+                    state: "idle",
+                    server_session_id: "runtime-session-b",
+                  },
+                },
+                content: [],
+              },
+            },
+            ...completedChatTurn().items,
+          ],
+        };
+      },
+    }),
+    "momo",
+    "",
+    "supervised",
+  );
+  brain.synchronizeServerSession("runtime-session-a");
+
+  await brain.handle(
+    {
+      id: 709,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "先确认状态",
+    },
+    {
+      id: 709,
+      route: "act",
+      reason: "continue after grounding",
+      capability_hint: "gather",
+    },
+  );
+
+  assert.equal(brain.serverSessionId, "runtime-session-b");
+  assert.equal(brain.hasAwaitingTask("task-from-dead-session"), false);
+});
+
+test("a stale receipt is excluded from verified context and quarantines its thread", async () => {
+  const oldReceipt = acceptedTaskWithoutChatTurn(
+    "task-from-quarantined-session",
+    "mine",
+    { serverSessionId: "runtime-session-a" },
+  );
+  const starts = [];
+  const prompts = [[], []];
+  const brain = new MomoBrain(
+    (_selection, previousThreadId, profile) => {
+      const index = starts.length;
+      starts.push({ previousThreadId, profile });
+      return {
+        id: `session-thread-${index}`,
+        async run(prompt) {
+          prompts[index].push(prompt);
+          if (index === 0) {
+            if (prompts[index].length > 1) {
+              throw new Error("quarantined thread was reused");
+            }
+            return {
+              items: [
+                ...oldReceipt.items,
+                {
+                  type: "mcp_tool_call",
+                  server: "numen",
+                  tool: "task_status",
+                  status: "completed",
+                  result: {
+                    structured_content: {
+                      success: true,
+                      data: {
+                        state: "idle",
+                        server_session_id: "runtime-session-b",
+                      },
+                    },
+                    content: [],
+                  },
+                },
+              ],
+            };
+          }
+          return completedChatTurn();
+        },
+      };
+    },
+    "momo",
+    "",
+    "supervised",
+  );
+  brain.synchronizeServerSession("runtime-session-b");
+
+  await brain.handle(
+    {
+      id: 710,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "确认后继续",
+    },
+    {
+      id: 710,
+      route: "act",
+      reason: "continue after grounding",
+      capability_hint: "gather",
+    },
+  );
+
+  assert.equal(brain.hasAwaitingTask("task-from-quarantined-session"), false);
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].previousThreadId, null);
+  assert.equal(brain.exportState().thread_id, "session-thread-1");
+  const capsule = JSON.stringify(brain.exportState().context_capsule);
+  assert.doesNotMatch(capsule, /task-from-quarantined-session/);
+  assert.doesNotMatch(capsule, /runtime-session-a/);
+  assert.match(capsule, /runtime-session-b/);
+  assert.match(prompts[1][0], /"mode":"full_compact_snapshot"/);
+  assert.doesNotMatch(prompts[1][0], /task-from-quarantined-session/);
+});
+
+test("accepted action survives ACK failure as a durable duplicate disposition", async () => {
+  let turns = 0;
+  let ackCalls = 0;
+  const event = {
+    id: 705,
+    type: "player_chat",
+    playerName: "Alex",
+    message: "继续挖",
+  };
+  const decision = {
+    id: 705,
+    route: "act",
+    reason: "continue",
+    capability_hint: "gather",
+  };
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return acceptedTaskWithoutChatTurn(
+          "task-before-ack-failure",
+          "mine",
+          { serverSessionId: "session-ack" },
+        );
+      },
+    }),
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    async () => {
+      ackCalls += 1;
+      if (ackCalls === 1) throw new Error("chat ACK transport failed");
+    },
+    { async durableCheckpoint() {} },
+  );
+  brain.reconcileLiveState({
+    serverSessionId: "session-ack",
+    activeTaskIds: [],
+  });
+
+  await assert.rejects(
+    brain.handle(event, decision),
+    /chat ACK transport failed/,
+  );
+  assert.equal(
+    brain.handledInput(event)?.acceptedTask,
+    "task-before-ack-failure",
+  );
+  assert.equal(brain.pendingPlayerGoals.length, 0);
+
+  assert.deepEqual(await brain.handle(event, decision), {
+    interrupted: false,
+    deduplicated: true,
+  });
+  assert.equal(turns, 1);
+  assert.equal(ackCalls, 2);
+});
+
+test("source dedup uses unique event ids without collapsing one player's later chat", async () => {
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+  );
+  const first = {
+    id: 706,
+    type: "player_chat",
+    playerName: "Alex",
+    playerUuid: "same-player",
+    message: "第一条",
+  };
+  const second = {
+    ...first,
+    id: 707,
+    message: "第二条",
+  };
+  const reply = { route: "reply", reason: "conversation" };
+
+  await brain.handle(first, { ...reply, id: first.id });
+  await brain.handle(second, { ...reply, id: second.id });
+  assert.equal(turns, 2);
+  assert.deepEqual(await brain.handle(first, { ...reply, id: first.id }), {
+    interrupted: false,
+    deduplicated: true,
+  });
+  assert.equal(turns, 2);
+});
+
+test("source dedup scopes a reused producer event id by its receive time", async () => {
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+  );
+  const oldSession = {
+    id: 1,
+    type: "player_chat",
+    playerName: "Alex",
+    playerUuid: "same-player",
+    message: "旧会话",
+    receivedAtEpochMillis: 1_000,
+  };
+  const newSession = {
+    ...oldSession,
+    message: "新会话",
+    receivedAtEpochMillis: 2_000,
+  };
+  const reply = { route: "reply", reason: "conversation" };
+
+  await brain.handle(oldSession, { ...reply, id: oldSession.id });
+  await brain.handle(newSession, { ...reply, id: newSession.id });
+  assert.equal(turns, 2);
+  assert.deepEqual(
+    await brain.handle(oldSession, { ...reply, id: oldSession.id }),
+    {
+      interrupted: false,
+      deduplicated: true,
+    },
+  );
+  assert.equal(turns, 2);
 });

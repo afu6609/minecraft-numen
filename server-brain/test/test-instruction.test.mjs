@@ -70,6 +70,7 @@ test("fresh instruction stays undispatched until the old server task stops", asy
       stopAttempts += 1;
       if (stopAttempts === 1) throw new Error("temporary MCP failure");
     },
+    async stopNativeNavigation() {},
   };
   const brain = {
     interrupt() {
@@ -121,6 +122,9 @@ test("an authoritatively idle body satisfies the fresh test stop fence", async (
       async stopTask() {
         throw new Error("没有进行中的后台任务,不需要叫停。");
       },
+      async stopNativeNavigation() {
+        throw new Error("no active native navigation task");
+      },
     },
     companion: "momo",
     event: valid,
@@ -142,4 +146,36 @@ test("an authoritatively idle body satisfies the fresh test stop fence", async (
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls, ["begin", "push"]);
+});
+
+test("fresh test dispatch can establish its fence without waking the inbox", async () => {
+  const calls = [];
+  const result = await dispatchFreshTestInstruction({
+    client: {
+      async stopTask() {},
+      async stopNativeNavigation() {},
+    },
+    companion: "momo",
+    event: valid,
+    brain: {
+      interrupt() {
+        calls.push("interrupt");
+        return false;
+      },
+    },
+    inbox: {
+      beginFreshTestRun() {
+        calls.push("begin");
+      },
+      push() {
+        calls.push("push");
+        return true;
+      },
+    },
+    enqueue: false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.item.event, valid);
+  assert.deepEqual(calls, ["begin", "interrupt"]);
 });

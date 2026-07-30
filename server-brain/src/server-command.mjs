@@ -132,6 +132,29 @@ function shortFailure(error) {
   return clean.slice(0, 180) || "服务器拒绝了这条指令";
 }
 
+function stableRequestId(event) {
+  const serverSessionId =
+    event?.serverSessionId ?? event?.server_session_id ?? null;
+  const eventId = event?.id ?? null;
+  if (
+    typeof serverSessionId !== "string" ||
+    serverSessionId.trim() === "" ||
+    (typeof eventId !== "string" && typeof eventId !== "number")
+  ) {
+    throw new Error("服务器指令缺少稳定的会话事件编号，已拒绝执行");
+  }
+  return `server-event:${serverSessionId.trim()}:${String(eventId)}`;
+}
+
+async function trySendChat(client, companion, message) {
+  try {
+    await client.sendChat(companion, message);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class ServerCommandGateway {
   constructor(client, companion) {
     this.client = client;
@@ -140,26 +163,68 @@ export class ServerCommandGateway {
 
   async handle(event, request) {
     if (!request.authorized) {
-      await this.client.sendChat(
+      const notified = await trySendChat(
+        this.client,
         this.companion,
         "这类服务器指令只接受管理员 Haa258 的明确请求。",
       );
-      return { ok: false, reason: "unauthorized player" };
+      return { ok: false, reason: "unauthorized player", notified };
     }
+
+    let requestId;
     try {
-      await this.client.runCommand(this.companion, request.command);
-      await this.client.sendChat(
-        this.companion,
-        request.reply ?? `好，已执行 ${request.command.slice(0, 180)}。`,
-      );
-      return { ok: true };
+      requestId = stableRequestId(event);
     } catch (error) {
       const reason = shortFailure(error);
-      await this.client.sendChat(
+      const notified = await trySendChat(
+        this.client,
         this.companion,
         `这条指令没执行：${reason}`,
       );
-      return { ok: false, reason };
+      return { ok: false, reason, notified };
     }
+
+    let commandError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.client.runCommand(
+          this.companion,
+          request.command,
+          requestId,
+        );
+        commandError = null;
+        break;
+      } catch (error) {
+        commandError = error;
+      }
+    }
+    if (commandError != null) {
+      const reason = shortFailure(commandError);
+      const uncertain =
+        /outcome is unknown|refusing to replay|执行结果不确定/iu.test(reason);
+      const notified = await trySendChat(
+        this.client,
+        this.companion,
+        uncertain
+          ? `这条指令的执行结果不确定，我没有重复执行：${reason}`
+          : `这条指令没执行：${reason}`,
+      );
+      return { ok: false, reason, notified, requestId };
+    }
+
+    const notified = await trySendChat(
+      this.client,
+      this.companion,
+      request.reply ?? `好，已执行 ${request.command.slice(0, 180)}。`,
+    );
+    return {
+      ok: true,
+      executed: true,
+      notified,
+      requestId,
+      ...(!notified
+        ? { reason: "command executed; chat notification failed" }
+        : {}),
+    };
   }
 }

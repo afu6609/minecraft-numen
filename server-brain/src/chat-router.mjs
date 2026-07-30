@@ -1,5 +1,17 @@
 const ROUTES = new Set(["ignore", "reply", "act"]);
 const DEFAULT_ALIASES = Object.freeze(["momo", "桃桃"]);
+export const CAPABILITY_HINTS = Object.freeze([
+  "conversation",
+  "orient",
+  "gather",
+  "craft",
+  "structure",
+  "regional_edit",
+  "direct_action",
+  "survival",
+  "combat_learning",
+]);
+const CAPABILITY_HINT_SET = new Set(CAPABILITY_HINTS);
 
 export const CLASSIFIER_OUTPUT_SCHEMA = {
   type: "object",
@@ -16,8 +28,19 @@ export const CLASSIFIER_OUTPUT_SCHEMA = {
           reason: { type: "string" },
           reply: { type: "string" },
           continues_goal: { type: "boolean" },
+          capability_hint: {
+            type: "string",
+            enum: CAPABILITY_HINTS,
+          },
         },
-        required: ["id", "route", "reason", "reply", "continues_goal"],
+        required: [
+          "id",
+          "route",
+          "reason",
+          "reply",
+          "continues_goal",
+          "capability_hint",
+        ],
       },
     },
   },
@@ -41,6 +64,16 @@ Also return continues_goal:
 - true only when the message explicitly operates on the companion's current work: stop/cancel it, continue it, ask its progress, report that it is stuck/failed/wrong, or request a changed approach.
 - false for greetings, static questions, ignored chat, and every independent new gameplay request.
 
+Also return capability_hint. For ignore/reply use conversation. For act choose exactly one:
+- orient: inspect live status/position/surroundings, navigation, following, or ambiguous recovery.
+- gather: harvest, mine, collect, or acquire materials.
+- craft: recipes, crafting, furnaces, containers, or inventory transfer.
+- structure: design/build/furnish/repair/demolish a saved construction workflow.
+- regional_edit: clear/fill/level bounded terrain or edit a selected semantic object.
+- direct_action: use/place/break/interact/equip one small explicit target.
+- survival: immediate ordinary combat, safety, food, shelter, or hostile mobs.
+- combat_learning: observe or revise a learned combat policy for an unfamiliar entity.
+
 Events:
 ${JSON.stringify(events)}`;
 }
@@ -61,6 +94,7 @@ export function normalizeDecisions(events, payload) {
       typeof item.reason !== "string" ||
       typeof item.reply !== "string" ||
       typeof item.continues_goal !== "boolean" ||
+      !CAPABILITY_HINT_SET.has(item.capability_hint) ||
       decisions.has(item.id)
     ) {
       throw new TypeError("classifier returned an invalid or duplicate decision");
@@ -69,7 +103,9 @@ export function normalizeDecisions(events, payload) {
     if (
       (item.route === "reply" && reply === "") ||
       (item.route !== "reply" && reply !== "") ||
-      (item.route !== "act" && item.continues_goal)
+      (item.route !== "act" && item.continues_goal) ||
+      (item.route !== "act" && item.capability_hint !== "conversation") ||
+      (item.route === "act" && item.capability_hint === "conversation")
     ) {
       throw new TypeError("classifier returned an invalid route reply");
     }
@@ -80,6 +116,7 @@ export function normalizeDecisions(events, payload) {
       reply,
       fastReply: item.route === "reply",
       continues_goal: item.continues_goal,
+      capability_hint: item.capability_hint,
     });
   }
   if (decisions.size !== expected.size) {
@@ -145,6 +182,60 @@ function continuationRequest(message) {
   );
 }
 
+export function deterministicCapabilityHint(message) {
+  const compact = String(message ?? "").replace(/\s+/gu, "");
+  if (
+    /(?:战斗策略|攻击模式|观察.{0,8}(?:攻击|动作|招式)|接下来.{0,8}(?:攻击|动作)|招式|动作模式|combatpolicy|combattrace)/iu.test(
+      compact,
+    )
+  ) {
+    return "combat_learning";
+  }
+  if (
+    /(?:清理|填(?:坑|平)|平整|铲平|多余(?:的)?(?:土|石|方块)|地形|凸起|坑|区域|regional)/iu.test(
+      compact,
+    )
+  ) {
+    return "regional_edit";
+  }
+  if (
+    /(?:建|造|搭|房|屋|家具|门窗|屋顶|蓝图|拆掉.*(?:房|建筑)|structure|build)/iu.test(
+      compact,
+    )
+  ) {
+    return "structure";
+  }
+  if (
+    /(?:合成|制作|烧|熔炼|熔炉|箱子|容器|背包.*整理|转移|配方|craft|smelt)/iu.test(
+      compact,
+    )
+  ) {
+    return "craft";
+  }
+  if (
+    /(?:苦力怕|僵尸|骷髅|幻翼|怪物|敌人|攻击|打|杀|躲|逃|保护|守住|安全|战斗|combat|attack)/iu.test(
+      compact,
+    )
+  ) {
+    return "survival";
+  }
+  if (
+    /(?:砍|挖|采|收集|获取|材料|木头|原木|矿|沙子|harvest|mine|gather|collect)/iu.test(
+      compact,
+    )
+  ) {
+    return "gather";
+  }
+  if (
+    /(?:放|使用|打开|关上|拿|给|丢|吃|穿|装备|交互|break|place|interact|equip)/iu.test(
+      compact,
+    )
+  ) {
+    return "direct_action";
+  }
+  return "orient";
+}
+
 function socialReply(event, message) {
   const compact = message
     .toLowerCase()
@@ -194,6 +285,7 @@ export function deterministicDecision(
       reply,
       fastReply: true,
       continues_goal: false,
+      capability_hint: "conversation",
     };
   }
   if (directActionRequest(message)) {
@@ -207,6 +299,7 @@ export function deterministicDecision(
       reply: "",
       fastReply: false,
       continues_goal: continuationRequest(message),
+      capability_hint: deterministicCapabilityHint(message),
     };
   }
   return null;

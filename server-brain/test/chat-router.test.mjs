@@ -21,6 +21,7 @@ test("classifier decisions preserve event order", () => {
         reason: "follow request",
         reply: "",
         continues_goal: false,
+        capability_hint: "orient",
       },
       {
         id: 7,
@@ -28,6 +29,7 @@ test("classifier decisions preserve event order", () => {
         reason: "human conversation",
         reply: "",
         continues_goal: false,
+        capability_hint: "conversation",
       },
     ],
   });
@@ -47,6 +49,7 @@ test("classifier must return one unique decision per event", () => {
             reason: "only one",
             reply: "",
             continues_goal: false,
+            capability_hint: "conversation",
           },
         ],
       }),
@@ -69,6 +72,7 @@ test("router passes a strict output schema to the small-model thread", async () 
             reason: "test",
             reply: "",
             continues_goal: false,
+            capability_hint: "conversation",
           }],
         }),
       };
@@ -126,7 +130,9 @@ test("clear direct gameplay requests bypass the classifier but still reach the a
   assert.equal(player.route, "act");
   assert.equal(player.reply, "");
   assert.equal(player.continues_goal, false);
+  assert.equal(player.capability_hint, "gather");
   assert.equal(console.route, "act");
+  assert.equal(console.capability_hint, "direct_action");
   assert.match(console.reason, /console/);
   assert.equal(
     deterministicDecision({
@@ -137,6 +143,23 @@ test("clear direct gameplay requests bypass the classifier but still reach the a
     }),
     null,
   );
+});
+
+test("Chinese requests choose the narrowest safe capability phase", () => {
+  for (const [id, message, expected] of [
+    [20, "桃桃，清理木屋周围的多余土块", "regional_edit"],
+    [21, "桃桃，建一个安全的小屋", "structure"],
+    [22, "桃桃，观察苦力怕接下来的攻击动作", "combat_learning"],
+  ]) {
+    const decision = deterministicDecision({
+      id,
+      type: "player_chat",
+      playerName: "Alex",
+      message,
+    });
+    assert.equal(decision?.route, "act", message);
+    assert.equal(decision?.capability_hint, expected, message);
+  }
 });
 
 test("explicit progress and correction messages continue the active goal", () => {
@@ -170,6 +193,7 @@ test("small-model static replies are returned ready for the direct chat sink", a
               reason: "static Minecraft question",
               reply: "熔炉需要八个圆石，中间留空。",
               continues_goal: false,
+              capability_hint: "conversation",
             },
           ],
         }),

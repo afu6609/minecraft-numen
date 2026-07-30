@@ -1,4 +1,32 @@
 const OPAQUE_ACTION_ID = /^[A-Za-z][A-Za-z0-9._:-]{0,127}$/u;
+const OPAQUE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const ASYNC_RECEIPT_TOOLS = new Set([
+  "follow_player",
+  "melee_attack",
+  "ranged_attack",
+  "build",
+  "break_block",
+  "mine",
+  "collect_items",
+  "craft",
+  "structure_execute",
+  "embodied_move_to",
+  "embodied_follow_owner",
+  "embodied_execute_plan",
+  "run_skill",
+]);
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value != null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonical(item)]),
+    );
+  }
+  return value;
+}
 
 function payloadsFromResult(result) {
   if (result == null) return [];
@@ -32,15 +60,22 @@ function payloadsFromResult(result) {
       // envelopes are trusted as action receipts.
     }
   }
-  return payloads;
+  if (payloads.length <= 1) return payloads;
+  const fingerprints = new Set(
+    payloads.map((payload) => JSON.stringify(canonical(payload))),
+  );
+  return fingerprints.size === 1 ? [payloads[0]] : [];
 }
 
-function completedNumenCalls(turn) {
+function completedGameplayCalls(turn) {
   const calls = [];
   for (const item of Array.isArray(turn?.items) ? turn.items : []) {
     if (
       item?.type !== "mcp_tool_call" ||
-      item.server !== "numen" ||
+      !(
+        item.server === "numen" ||
+        (item.server === "momo_harness" && item.tool === "run_skill")
+      ) ||
       item.status !== "completed" ||
       item.tool === "send_chat" ||
       item.result?.isError === true
@@ -61,19 +96,40 @@ function acceptedReceipt(item, payload) {
     payload?.success !== true ||
     data?.async !== true ||
     typeof taskId !== "string" ||
-    !OPAQUE_ACTION_ID.test(taskId)
+    !OPAQUE_ACTION_ID.test(taskId) ||
+    !ASYNC_RECEIPT_TOOLS.has(item.tool)
   ) {
     return null;
   }
   const actionId = data?.action_id ?? data?.actionId;
+  const jobId = data?.job_id ?? data?.jobId ?? data?.job?.job_id;
+  const serverSessionId =
+    data?.server_session_id ??
+    data?.serverSessionId;
+  if (
+    (actionId != null &&
+      (typeof actionId !== "string" || !OPAQUE_ACTION_ID.test(actionId))) ||
+    (jobId != null &&
+      (typeof jobId !== "string" || !OPAQUE_ACTION_ID.test(jobId))) ||
+    typeof serverSessionId !== "string" ||
+    !OPAQUE_SESSION_ID.test(serverSessionId)
+  ) {
+    return null;
+  }
   return {
     kind: "accepted_task",
+    server: item.server,
     tool: item.tool,
     taskId,
     actionId:
       typeof actionId === "string" && OPAQUE_ACTION_ID.test(actionId)
         ? actionId
         : null,
+    jobId:
+      typeof jobId === "string" && OPAQUE_ACTION_ID.test(jobId)
+        ? jobId
+        : null,
+    serverSessionId,
   };
 }
 
@@ -94,11 +150,48 @@ function acceptedMessage(tool) {
   return "好，我开始处理了。";
 }
 
+export function acceptedNumenTaskReceipts(turn) {
+  const accepted = new Map();
+  for (const { item, payload } of completedGameplayCalls(turn)) {
+    const receipt = acceptedReceipt(item, payload);
+    if (receipt != null) accepted.set(receipt.taskId, receipt);
+  }
+  return [...accepted.values()];
+}
+
+/**
+ * A successful task_status response is the live JVM authority for a completed
+ * turn. Async receipts prove that an action was accepted, but a delayed receipt
+ * from a JVM that died during the turn must never move the Harness back to that
+ * expired session.
+ */
+export function authoritativeTaskStatusSession(turn) {
+  let serverSessionId = null;
+  for (const { item, payload } of completedGameplayCalls(turn)) {
+    if (
+      item.server !== "numen" ||
+      item.tool !== "task_status" ||
+      payload?.success !== true
+    ) {
+      continue;
+    }
+    const candidate =
+      payload?.data?.server_session_id ??
+      payload?.data?.serverSessionId;
+    if (
+      typeof candidate === "string" &&
+      OPAQUE_SESSION_ID.test(candidate)
+    ) {
+      serverSessionId = candidate;
+    }
+  }
+  return serverSessionId;
+}
+
 export function acceptedNumenTaskIds(turn) {
   const accepted = new Set();
-  for (const { item, payload } of completedNumenCalls(turn)) {
-    const receipt = acceptedReceipt(item, payload);
-    if (receipt != null) accepted.add(receipt.taskId);
+  for (const receipt of acceptedNumenTaskReceipts(turn)) {
+    accepted.add(receipt.taskId);
   }
   return accepted;
 }
@@ -111,11 +204,23 @@ export function acceptedNumenTaskIds(turn) {
  * postcondition receipt whose meaning cannot be confused with verified
  * perception or feasibility data.
  */
-export function trustedAckForTurn(turn) {
-  for (const { item, payload } of completedNumenCalls(turn)) {
+export function trustedAckForTurn(turn, { serverSessionId = null } = {}) {
+  for (const { item, payload } of completedGameplayCalls(turn)) {
     const accepted = acceptedReceipt(item, payload);
-    if (accepted != null) {
-      return { ...accepted, message: acceptedMessage(accepted.tool) };
+    if (
+      accepted != null &&
+      (
+        serverSessionId == null ||
+        accepted.serverSessionId === serverSessionId
+      )
+    ) {
+      return {
+        kind: accepted.kind,
+        tool: accepted.tool,
+        taskId: accepted.taskId,
+        actionId: accepted.actionId,
+        message: acceptedMessage(accepted.tool),
+      };
     }
   }
   return null;

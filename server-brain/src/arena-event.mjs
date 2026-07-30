@@ -1,3 +1,5 @@
+import { ensureBodyStopped } from "./server-control.mjs";
+
 function nonBlank(value) {
   if (typeof value !== "string") return null;
   const clean = value.trim();
@@ -67,9 +69,6 @@ export function decodeTestInstructionEvent(event, expectedCompanion) {
   };
 }
 
-const ALREADY_IDLE =
-  /没有进行中的后台任务|already idle|no background task/iu;
-
 /**
  * Hard fence between two arena runs.
  *
@@ -83,35 +82,43 @@ export async function dispatchFreshTestInstruction({
   event,
   inbox,
   brain,
+  enqueue = true,
 }) {
   // Establish the generation fence before the asynchronous MCP stop. Without
   // this ordering, the worker could begin reconciling an old queued event
   // while stopTask is in flight and submit fresh work behind the stop.
-  inbox.beginFreshTestRun(event.id);
+  const fenced = inbox.beginFreshTestRun(event.id, event);
+  if (fenced === false) {
+    return {
+      ok: false,
+      interruptedTurn: false,
+      reason: "test instruction belongs to a stale server session",
+      item: null,
+    };
+  }
   const interruptedTurn = brain.interrupt({
     preserveTaskRecovery: false,
   });
-  try {
-    await client.stopTask(companion);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    if (!ALREADY_IDLE.test(reason)) {
-      return {
-        ok: false,
-        interruptedTurn,
-        reason: reason.slice(0, 180),
-      };
-    }
+  const stopped = await ensureBodyStopped(client, companion);
+  if (!stopped.ok) {
+    return {
+      ok: false,
+      interruptedTurn,
+      reason: stopped.reason,
+    };
   }
 
-  const queued = inbox.push({
+  const item = {
     event,
     decision: null,
     commandRequest: null,
-  });
+  };
+  const queued = enqueue ? inbox.push(item) : true;
   return {
     ok: queued,
     interruptedTurn,
     reason: queued ? undefined : "event inbox is closed",
+    item: enqueue ? null : item,
+    ...(stopped.liveBody == null ? {} : { liveBody: stopped.liveBody }),
   };
 }

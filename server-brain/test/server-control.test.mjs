@@ -46,3 +46,45 @@ test("stop gateway interrupts the active task before acknowledging", async () =>
     ["chat", "momo", "好，我停下了。"],
   ]);
 });
+
+test("one failed stop lane is not reported as a successful hard stop", async () => {
+  const messages = [];
+  const gateway = new ServerControlGateway(
+    {
+      async stopTask() {},
+      async stopNativeNavigation() {
+        throw new Error("navigation endpoint unavailable");
+      },
+      async sendChat(_companion, message) {
+        messages.push(message);
+      },
+    },
+    "momo",
+  );
+
+  const result = await gateway.handle();
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /navigation endpoint unavailable/);
+  assert.deepEqual(messages, ["我没能立刻停下，稍等一下。"]);
+});
+
+test("live idle inspection can authoritatively close ambiguous stop lanes", async () => {
+  const gateway = new ServerControlGateway(
+    {
+      async stopTask() {},
+      async stopNativeNavigation() {
+        throw new Error("temporary transport failure");
+      },
+      async inspectBodyWork() {
+        return { activeTaskIds: [] };
+      },
+      async sendChat() {},
+    },
+    "momo",
+  );
+
+  assert.deepEqual(await gateway.handle(), {
+    ok: true,
+    liveBody: { activeTaskIds: [] },
+  });
+});

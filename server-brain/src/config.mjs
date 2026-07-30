@@ -96,6 +96,46 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
       330,
       { min: 10, max: 3_600 },
     ),
+    agentTurnTimeoutSeconds: integer(
+      env,
+      "MOMO_AGENT_TURN_TIMEOUT_SECONDS",
+      360,
+      { min: 30, max: 3_600 },
+    ),
+    goalMaxTurns: integer(env, "MOMO_GOAL_MAX_TURNS", 24, {
+      min: 4,
+      max: 200,
+    }),
+    goalMaxToolCalls: integer(env, "MOMO_GOAL_MAX_TOOL_CALLS", 96, {
+      min: 8,
+      max: 1_000,
+    }),
+    goalMaxRecoveryTurns: integer(
+      env,
+      "MOMO_GOAL_MAX_RECOVERY_TURNS",
+      12,
+      { min: 2, max: 100 },
+    ),
+    goalMaxElapsedMinutes: integer(
+      env,
+      "MOMO_GOAL_MAX_ELAPSED_MINUTES",
+      45,
+      { min: 5, max: 1_440 },
+    ),
+    threadCheckpointTurns: integer(
+      env,
+      "MOMO_THREAD_CHECKPOINT_TURNS",
+      6,
+      { min: 2, max: 40 },
+    ),
+    harnessMcpPort: integer(env, "MOMO_HARNESS_MCP_PORT", 8766, {
+      min: 1_024,
+      max: 65_535,
+    }),
+    traceMaxMb: integer(env, "MOMO_TRACE_MAX_MB", 8, {
+      min: 1,
+      max: 256,
+    }),
     codexPath: env.CODEX_PATH?.trim() || undefined,
     workingDirectory,
     personaFile: path.resolve(
@@ -105,6 +145,18 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     modelStateFile: path.resolve(
       workingDirectory,
       env.MOMO_MODEL_STATE_FILE?.trim() || "runtime/model-selection.json",
+    ),
+    brainStateFile: path.resolve(
+      workingDirectory,
+      env.MOMO_BRAIN_STATE_FILE?.trim() || "runtime/harness-state.json",
+    ),
+    traceFile: path.resolve(
+      workingDirectory,
+      env.MOMO_TRACE_FILE?.trim() || "runtime/harness-trace.ndjson",
+    ),
+    experienceDirectory: path.resolve(
+      workingDirectory,
+      env.MOMO_EXPERIENCE_DIRECTORY?.trim() || "runtime/skills",
     ),
   });
 }

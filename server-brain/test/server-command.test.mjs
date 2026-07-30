@@ -55,8 +55,8 @@ test("gateway calls restricted MCP tool and reports through ordinary chat", asyn
   const calls = [];
   const gateway = new ServerCommandGateway(
     {
-      async runCommand(companion, command) {
-        calls.push(["run", companion, command]);
+      async runCommand(companion, command, requestId) {
+        calls.push(["run", companion, command, requestId]);
       },
       async sendChat(companion, message) {
         calls.push(["chat", companion, message]);
@@ -66,12 +66,21 @@ test("gateway calls restricted MCP tool and reports through ordinary chat", asyn
   );
 
   const result = await gateway.handle(
-    { playerName: "Haa258" },
+    {
+      id: 42,
+      serverSessionId: "server-session-a",
+      playerName: "Haa258",
+    },
     { command: "/difficulty hard", authorized: true },
   );
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls[0], ["run", "momo", "/difficulty hard"]);
+  assert.deepEqual(calls[0], [
+    "run",
+    "momo",
+    "/difficulty hard",
+    "server-event:server-session-a:42",
+  ]);
   assert.match(calls[1][2], /已执行/);
 });
 
@@ -98,4 +107,80 @@ test("unauthorized players never reach the command tool", async () => {
   assert.equal(result.ok, false);
   assert.equal(ran, false);
   assert.match(chats[0], /只接受管理员/);
+});
+
+test("a lost command response retries with the same idempotency key", async () => {
+  const requestIds = [];
+  let attempts = 0;
+  const gateway = new ServerCommandGateway(
+    {
+      async runCommand(_companion, _command, requestId) {
+        requestIds.push(requestId);
+        attempts += 1;
+        if (attempts === 1) throw new Error("response lost");
+      },
+      async sendChat() {},
+    },
+    "momo",
+  );
+
+  const result = await gateway.handle(
+    { id: "77", server_session_id: "server-session-b" },
+    { command: "/weather clear", authorized: true },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(requestIds, [
+    "server-event:server-session-b:77",
+    "server-event:server-session-b:77",
+  ]);
+});
+
+test("chat notification failure never replays a successful command", async () => {
+  let runs = 0;
+  const gateway = new ServerCommandGateway(
+    {
+      async runCommand() {
+        runs += 1;
+      },
+      async sendChat() {
+        throw new Error("chat unavailable");
+      },
+    },
+    "momo",
+  );
+
+  const result = await gateway.handle(
+    { id: 88, serverSessionId: "server-session-c" },
+    { command: "/time set day", authorized: true },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.executed, true);
+  assert.equal(result.notified, false);
+  assert.equal(runs, 1);
+  assert.match(result.reason, /notification failed/);
+});
+
+test("authorized commands fail closed without a stable server event id", async () => {
+  let ran = false;
+  const gateway = new ServerCommandGateway(
+    {
+      async runCommand() {
+        ran = true;
+      },
+      async sendChat() {},
+    },
+    "momo",
+  );
+
+  const result = await gateway.handle(
+    { playerName: "Haa258" },
+    { command: "/time set day", authorized: true },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(ran, false);
+  assert.match(result.reason, /稳定的会话事件编号/);
 });
