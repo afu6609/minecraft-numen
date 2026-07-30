@@ -17,6 +17,41 @@ function completedChatTurn() {
   };
 }
 
+function completedAsyncTaskTurn(
+  taskId,
+  tool = "craft",
+  { structured = false } = {},
+) {
+  const payload = {
+    success: true,
+    message: "accepted",
+    data: {
+      async: true,
+      task_id: taskId,
+      task: tool,
+    },
+  };
+  return {
+    items: [
+      {
+        id: `call-${taskId}`,
+        type: "mcp_tool_call",
+        server: "numen",
+        tool,
+        arguments: { companion: "momo" },
+        status: "completed",
+        result: structured
+          ? { structured_content: payload, content: [] }
+          : {
+              content: [{ type: "text", text: JSON.stringify(payload) }],
+              structured_content: null,
+            },
+      },
+      ...completedChatTurn().items,
+    ],
+  };
+}
+
 test("Codex runtimes isolate the classifier and expose only Numen to the agent", () => {
   const constructed = [];
   class FakeCodex {
@@ -400,6 +435,36 @@ test("brain makes one corrective turn when the agent forgets visible chat", asyn
   assert.match(prompts[0], /Only after an action tool has actually returned/);
 });
 
+test("console chat never invents a human body or location", async () => {
+  let prompt;
+  const brain = new MomoBrain(
+    () => ({
+      async run(received) {
+        prompt = received;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+  );
+
+  await brain.handle(
+    {
+      id: 12,
+      type: "console_chat",
+      playerName: "Server",
+      playerUuid: null,
+      message: "看看你附近安全吗",
+    },
+    { id: 12, route: "act", reason: "live safety check" },
+  );
+
+  assert.match(prompt, /authenticated server-console message/);
+  assert.match(prompt, /has no human player body, UUID, gaze, or world position/);
+  assert.match(prompt, /relative to the companion's freshly observed position/);
+});
+
 test("task completion returns to the persistent brain for verification", async () => {
   const prompts = [];
   const brain = new MomoBrain(
@@ -464,13 +529,22 @@ test("supervised mode does not continue an orphan task event", async () => {
   assert.equal(result.held, true);
 });
 
-test("supervised explicit goal may reconcile until its body-work lease closes", async () => {
-  let turns = 0;
+test("supervised fast tasks reconcile only by accepted id across idle gaps", async () => {
+  const prompts = [];
+  const turns = [
+    completedAsyncTaskTurn("t140", "craft"),
+    completedAsyncTaskTurn(
+      "t141",
+      "structure_execute",
+      { structured: true },
+    ),
+    completedChatTurn(),
+  ];
   const brain = new MomoBrain(
     () => ({
-      async run() {
-        turns += 1;
-        return completedChatTurn();
+      async run(prompt) {
+        prompts.push(prompt);
+        return turns.shift();
       },
     }),
     "momo",
@@ -478,24 +552,58 @@ test("supervised explicit goal may reconcile until its body-work lease closes", 
     "supervised",
   );
 
-  brain.beginExplicitGoal();
-  brain.refreshGoalLease(true);
-  await brain.handleTaskEvent({
-    id: 132,
+  await brain.handle(
+    {
+      id: 132,
+      type: "player_chat",
+      playerName: "Alex",
+      message: "继续建屋",
+    },
+    { id: 132, route: "act", reason: "continue building" },
+  );
+
+  // The accepted task completed before task_status was sampled, so the
+  // point-in-time body lease already reads idle.
+  brain.refreshGoalLease(false);
+  const orphan = await brain.handleTaskEvent({
+    id: 133,
     type: "task_finished",
-    taskId: "player-task",
+    taskId: "t999",
     taskName: "build",
+    status: "done",
+    message: "old unrelated completion",
+  });
+  assert.equal(orphan.held, true);
+  assert.equal(prompts.length, 1);
+
+  await brain.handleTaskEvent({
+    id: 134,
+    type: "task_finished",
+    taskId: "t140",
+    taskName: "craft",
+    status: "done",
+    message: "furnace crafted",
+  });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /"taskId":"t140"/);
+
+  brain.refreshGoalLease(false);
+  await brain.handleTaskEvent({
+    id: 135,
+    type: "task_finished",
+    taskId: "t141",
+    taskName: "structure_execute",
     status: "done",
     message: "checkpoint done",
   });
-  assert.equal(turns, 1);
+  assert.equal(prompts.length, 3);
 
   brain.refreshGoalLease(false);
   const held = await brain.handleBodyEvent({
-    id: 133,
+    id: 136,
     type: "body_available",
   });
-  assert.equal(turns, 1);
+  assert.equal(prompts.length, 3);
   assert.equal(held.held, true);
 });
 
@@ -523,6 +631,49 @@ test("supervised mode drops orphan body telemetry instead of replaying it later"
   brain.beginExplicitGoal();
   await brain.retryBodyContext();
   assert.equal(prompts.length, 0);
+});
+
+test("inactive supervised defense telemetry leaves no pending body events", async () => {
+  let turns = 0;
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        turns += 1;
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "你是游戏玩家桃桃。",
+    "supervised",
+  );
+
+  assert.equal(
+    brain.noteBodyEvent({
+      id: "inactive-defense-start",
+      type: "defense_started",
+    }),
+    false,
+  );
+  assert.equal(
+    brain.noteBodyEvent({
+      id: "inactive-damage",
+      type: "damage_received",
+    }),
+    false,
+  );
+  const result = await brain.handleBodyEvent({
+    id: "inactive-defense-finish",
+    type: "defense_finished",
+  });
+
+  assert.equal(result.held, true);
+  assert.deepEqual(brain.pendingBodyEvents, []);
+  brain.beginExplicitGoal();
+  assert.deepEqual(
+    await brain.retryBodyContext(),
+    { interrupted: false, empty: true },
+  );
+  assert.equal(turns, 0);
 });
 
 test("trusted test instruction gets a fresh high-level context and normal survival tools", async () => {
@@ -1149,7 +1300,10 @@ test("an interrupted task failure is carried into body recovery", async () => {
     }),
     "momo",
     "你是游戏玩家桃桃。",
+    "supervised",
   );
+  brain.noteAcceptedTasks(completedAsyncTaskTurn("t31", "build"));
+  brain.refreshGoalLease(false);
 
   const handling = brain.handleTaskEvent({
     id: 31,

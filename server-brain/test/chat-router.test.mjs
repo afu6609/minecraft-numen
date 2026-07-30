@@ -56,4 +56,6 @@ test("router passes a strict output schema to the small-model thread", async () 
   assert.match(receivedPrompt, /current location\/status\/progress/);
   assert.match(receivedPrompt, /stuck\/not moving\/doing the wrong thing/);
   assert.match(receivedPrompt, /must never promise a future world change/);
+  assert.match(receivedPrompt, /console_chat comes from the authenticated server panel/);
+  assert.match(receivedPrompt, /classify it as reply or act, never ignore/);
 });

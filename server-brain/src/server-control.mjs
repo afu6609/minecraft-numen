@@ -1,11 +1,18 @@
 const STOP_REQUEST =
   /^(?:桃桃|momo)\s*[,，:：]?\s*(?:停(?:下(?:来)?)?|停止|停手|先停(?:一下)?|别(?:砍|挖|跟|打|动)(?:了|啦)?|不要再?(?:砍|挖|跟|打|动)(?:了|啦)?|stop)\s*[。！!]*$/iu;
+const CONSOLE_STOP_REQUEST =
+  /^(?:(?:桃桃|momo)\s*[,，:：]?\s*)?(?:停(?:下(?:来)?)?|停止|停手|先停(?:一下)?|别(?:砍|挖|跟|打|动)(?:了|啦)?|不要再?(?:砍|挖|跟|打|动)(?:了|啦)?|stop)\s*[。！!]*$/iu;
 
 export function parseStopRequest(event) {
-  if (event?.type !== "player_chat" || typeof event.message !== "string") {
+  if (
+    !["player_chat", "console_chat"].includes(event?.type) ||
+    typeof event.message !== "string"
+  ) {
     return null;
   }
-  return STOP_REQUEST.test(event.message.trim())
+  const pattern =
+    event.type === "console_chat" ? CONSOLE_STOP_REQUEST : STOP_REQUEST;
+  return pattern.test(event.message.trim())
     ? Object.freeze({ type: "stop" })
     : null;
 }

@@ -1,5 +1,6 @@
 const FRESH_TEST_STALE_TYPES = new Set([
   "player_chat",
+  "console_chat",
   "task_finished",
   "test_instruction",
   "damage_received",
@@ -19,7 +20,7 @@ export class EventInbox {
     this.items = [];
     this.waiters = [];
     this.closed = false;
-    this.cancelPlayerChatThroughId = Number.NEGATIVE_INFINITY;
+    this.cancelChatThroughId = Number.NEGATIVE_INFINITY;
     this.testRunGeneration = 0;
     this.eventGenerations = new WeakMap();
   }
@@ -36,9 +37,13 @@ export class EventInbox {
   }
 
   cancelPlayerChatsThrough(eventId) {
+    this.cancelChatsThrough(eventId);
+  }
+
+  cancelChatsThrough(eventId) {
     if (Number.isFinite(eventId)) {
-      this.cancelPlayerChatThroughId = Math.max(
-        this.cancelPlayerChatThroughId,
+      this.cancelChatThroughId = Math.max(
+        this.cancelChatThroughId,
         eventId,
       );
       this.items = this.items.filter((item) => !this.isCancelled(item.event));
@@ -56,8 +61,8 @@ export class EventInbox {
   beginFreshTestRun(eventId) {
     this.testRunGeneration += 1;
     if (Number.isFinite(eventId)) {
-      this.cancelPlayerChatThroughId = Math.max(
-        this.cancelPlayerChatThroughId,
+      this.cancelChatThroughId = Math.max(
+        this.cancelChatThroughId,
         eventId,
       );
     }
@@ -65,13 +70,10 @@ export class EventInbox {
   }
 
   isCancelled(event) {
-    const stalePlayerChat =
-      event?.type === "player_chat" &&
+    const staleChat =
+      (event?.type === "player_chat" || event?.type === "console_chat") &&
       Number.isFinite(event.id) &&
-      event.id <= this.cancelPlayerChatThroughId;
-    const stoppedTask =
-      event?.type === "task_finished" &&
-      String(event.status ?? "").toLowerCase() === "stopped";
+      event.id <= this.cancelChatThroughId;
     const generation = event != null && typeof event === "object"
       ? this.eventGenerations.get(event)
       : undefined;
@@ -80,8 +82,7 @@ export class EventInbox {
       generation < this.testRunGeneration &&
       FRESH_TEST_STALE_TYPES.has(event?.type);
     return (
-      stalePlayerChat ||
-      stoppedTask ||
+      staleChat ||
       staleTestGeneration
     );
   }

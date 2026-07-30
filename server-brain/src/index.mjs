@@ -317,7 +317,7 @@ export async function run({
               config.commandPlayers,
             );
             if (controlRequest != null) {
-              inbox.cancelPlayerChatsThrough(event.id);
+              inbox.cancelChatsThrough(event.id);
               const interruptedTurn = brain.enterHold();
               const result = await controlGateway.handle(event, controlRequest);
               log(result.ok ? "info" : "warn", "server control handled", {
@@ -379,7 +379,8 @@ export async function run({
 
       const unclassified = pending.filter(
         (item) =>
-          item.event.type === "player_chat" &&
+          (item.event.type === "player_chat" ||
+            item.event.type === "console_chat") &&
           item.commandRequest == null &&
           item.decision == null &&
           !inbox.isCancelled(item.event),
@@ -451,12 +452,18 @@ export async function run({
           event.type === "defense_started" ||
           event.type === "death"
         ) {
-          brain.noteBodyEvent(event);
-          log("info", "companion body event buffered", {
-            eventId: event.id,
-            companion: event.companionName,
-            type: event.type,
-          });
+          const buffered = brain.noteBodyEvent(event);
+          log(
+            "info",
+            buffered
+              ? "companion body event buffered"
+              : "inactive companion body event dropped",
+            {
+              eventId: event.id,
+              companion: event.companionName,
+              type: event.type,
+            },
+          );
           continue;
         }
         if (
@@ -500,7 +507,10 @@ export async function run({
           }
           continue;
         }
-        if (event.type !== "player_chat") {
+        if (
+          event.type !== "player_chat" &&
+          event.type !== "console_chat"
+        ) {
           log("warn", "unknown server event ignored", {
             eventId: event.id,
             type: event.type,
@@ -521,6 +531,7 @@ export async function run({
         log("info", "chat routed", {
           eventId: event.id,
           player: event.playerName,
+          channel: event.type,
           route: decision.route,
           reason: decision.reason,
         });
@@ -533,7 +544,7 @@ export async function run({
             error: error instanceof Error ? error.message : String(error),
           });
         } finally {
-          await refreshGoalLease("player_chat");
+          await refreshGoalLease(event.type);
         }
       }
     }

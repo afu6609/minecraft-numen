@@ -1,5 +1,6 @@
 package com.dwinovo.numen.core.server;
 
+import com.dwinovo.numen.api.ServerBrainAdminEvents;
 import com.dwinovo.numen.api.ServerBrainConfiguration;
 import com.dwinovo.numen.core.Constants;
 import com.mojang.brigadier.CommandDispatcher;
@@ -64,7 +65,15 @@ public final class BrainConfigCommands {
                                                                 ::suggestReasoning)
                                                 .executes(
                                                         BrainConfigCommands
-                                                                ::set))))));
+                                                                ::set)))))
+                .then(Commands.literal("chat")
+                        .requires(source -> source.getEntity() == null)
+                        .then(Commands.argument(
+                                        "message",
+                                        StringArgumentType.greedyString())
+                                .executes(
+                                        BrainConfigCommands
+                                                ::consoleChat))));
     }
 
     public static void bindServer(MinecraftServer server) {
@@ -127,6 +136,33 @@ public final class BrainConfigCommands {
                 ServerBrainConfiguration.Action.SET,
                 StringArgumentType.getString(context, "model"),
                 StringArgumentType.getString(context, "reasoning"));
+    }
+
+    private static int consoleChat(
+            CommandContext<CommandSourceStack> context) {
+        CommandSourceStack source = context.getSource();
+        String message = StringArgumentType.getString(
+                context, "message");
+        final boolean accepted;
+        try {
+            accepted = ServerBrainAdminEvents.publishConsoleChat(
+                    source.getTextName(),
+                    message,
+                    source.getServer().overworld().getGameTime());
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            source.sendFailure(Component.literal(
+                    "无法发送给桃桃：" + ex.getMessage()));
+            return 0;
+        }
+        if (!accepted) {
+            source.sendFailure(Component.literal(
+                    "无法发送给桃桃：server-brain 事件队列正忙，消息未入队。"));
+            return 0;
+        }
+        source.sendSuccess(
+                () -> Component.literal("已发送给桃桃：" + message.trim()),
+                false);
+        return 1;
     }
 
     private static int publish(

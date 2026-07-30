@@ -8,6 +8,11 @@ classifies a batch as `ignore`, `reply`, or `act`; only `reply` and `act` wake
 the persistent gameplay agent. Player replies are sent through the companion
 body and appear to vanilla clients as ordinary `<momo> text` chat.
 
+Dedicated-server console and RCON operators can use `momo chat <message>` as
+the same bounded conversation/action channel without joining the world.
+Console events have no player UUID, body, gaze, or location, and companion
+replies are mirrored to both connected players and the server console.
+
 Trusted arena mods can also publish a `test_instruction` event through the
 server-only Java `ServerBrainAdminEvents` API. It bypasses the chat classifier
 and reaches the high-level Momo brain directly while retaining the same

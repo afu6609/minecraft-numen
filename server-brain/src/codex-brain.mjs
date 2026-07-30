@@ -57,6 +57,8 @@ candidate unchanged without new evidence or a revised policy.
 const FAILURE_TTL_MS = 10 * 60 * 1000;
 const MAX_FAILURE_SIGNATURES = 64;
 const MAX_DEFERRED_PLAYER_GOALS = 8;
+const ACCEPTED_TASK_TTL_MS = 15 * 60 * 1000;
+const NUMEN_TASK_ID = /^t[1-9]\d*$/u;
 
 function placementFailureReason(message) {
   if (/STATE_MISMATCH|different block state/i.test(message)) {
@@ -118,6 +120,10 @@ function placementFailureSignature(event) {
 }
 
 function eventPrompt(companion, event, decision, persona) {
+  const consoleContext =
+    event?.type === "console_chat"
+      ? `This is an authenticated server-console message addressed directly to the companion. It has no human player body, UUID, gaze, or world position. Do not call get_player_status or look_around_player for the console source. For unqualified tasks, act relative to the companion's freshly observed position; if words such as "我", "这里", or "这个" require a human location or target, ask one concise clarification instead of inventing one.`
+      : `When the request depends on the speaker's condition or location, call get_player_status with Event.playerName; use look_around_player when the blocks around that human matter. Do not assume every speaker is the companion owner.`;
   return `You are handling a new event inside a private Minecraft server.
 
 Companion body: ${JSON.stringify(companion)}
@@ -135,7 +141,7 @@ The Event object is authoritative about who spoke: keep playerName and playerUui
 
 If the route is reply, answer naturally and concisely through send_chat as ${companion}; never promise movement, building, checking, or another future world change on a reply route. If live state or action is actually needed despite the router label, use perception/action tools before answering. If the route is act, perceive and submit the concrete next action before send_chat. Only after an action tool has actually returned an accepted task_id or a synchronous verified result may you say you are going, following, building, retrying, or otherwise acting. If no action was accepted, state the specific observation, ambiguity, or obstacle instead of saying "正在处理" or promising movement. Do not answer every observed message, do not expose hidden reasoning, and do not merely write a proposed player reply in your final response: actually call send_chat.
 
-When the request depends on the speaker's condition or location, call get_player_status with Event.playerName; use look_around_player when the blocks around that human matter. Do not assume every speaker is the companion owner.`;
+${consoleContext}`;
 }
 
 function testInstructionPrompt(companion, event, persona) {
@@ -219,7 +225,9 @@ function deferredPlayerGoalKey(event) {
   ) {
     return null;
   }
-  return `player_chat:${String(id)}`;
+  const type =
+    event?.type === "console_chat" ? "console_chat" : "player_chat";
+  return `${type}:${String(id)}`;
 }
 
 function sentChat(turn) {
@@ -242,6 +250,56 @@ function completedNumenTool(turn, tool) {
   );
 }
 
+function parsedResultPayloads(result) {
+  if (result == null || typeof result !== "object") return [];
+  const payloads = [];
+  for (const structured of [
+    result.structured_content,
+    result.structuredContent,
+  ]) {
+    if (structured != null && typeof structured === "object") {
+      payloads.push(structured);
+    }
+  }
+  for (const block of Array.isArray(result.content) ? result.content : []) {
+    if (block?.type !== "text" || typeof block.text !== "string") continue;
+    try {
+      const parsed = JSON.parse(block.text);
+      if (parsed != null && typeof parsed === "object") payloads.push(parsed);
+    } catch {
+      // Old Numen MCP responses mix ordinary text and JSON content blocks.
+      // Only strict JSON envelopes can authorize a future task event.
+    }
+  }
+  return payloads;
+}
+
+function acceptedNumenTaskIds(turn) {
+  const accepted = new Set();
+  for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+    if (
+      item?.type !== "mcp_tool_call" ||
+      item.server !== "numen" ||
+      item.status !== "completed"
+    ) {
+      continue;
+    }
+    for (const payload of parsedResultPayloads(item.result)) {
+      const data = payload?.data;
+      const taskId = data?.task_id ?? data?.taskId;
+      if (
+        payload?.success === true &&
+        data?.async === true &&
+        typeof taskId === "string" &&
+        NUMEN_TASK_ID.test(taskId)
+      ) {
+        accepted.add(taskId);
+      }
+    }
+  }
+  return accepted;
+}
+
 export class MomoBrain {
   constructor(
     startThread,
@@ -262,6 +320,7 @@ export class MomoBrain {
     this.pendingBodyEvents = [];
     this.pendingTaskEvents = [];
     this.pendingPlayerGoals = [];
+    this.awaitingTaskIds = new Map();
     this.failureSignatures = new Map();
     this.activeTaskRecoveryEpoch = null;
     this.taskRecoveryPermissionEpoch = null;
@@ -284,6 +343,9 @@ export class MomoBrain {
     } else if (!preserveTaskRecovery) {
       this.taskRecoveryPermissionEpoch = null;
       this.pendingTaskEvents = [];
+    }
+    if (!preserveTaskRecovery) {
+      this.awaitingTaskIds.clear();
     }
     if (
       preservePlayerGoal &&
@@ -312,6 +374,7 @@ export class MomoBrain {
 
   refreshGoalLease(activeBodyWork) {
     if (this.activityMode === "supervised") {
+      this.pruneAwaitingTasks();
       this.supervisedGoalActive = activeBodyWork === true;
     }
   }
@@ -320,6 +383,7 @@ export class MomoBrain {
     return (
       this.activityMode === "autonomous" ||
       this.supervisedGoalActive ||
+      this.pendingTaskEvents.length > 0 ||
       this.pendingPlayerGoals.length > 0
     );
   }
@@ -332,6 +396,7 @@ export class MomoBrain {
     this.pendingBodyEvents = [];
     this.pendingTaskEvents = [];
     this.pendingPlayerGoals = [];
+    this.awaitingTaskIds.clear();
     this.failureSignatures.clear();
     this.supervisedGoalActive = false;
     this.thread = null;
@@ -362,6 +427,7 @@ export class MomoBrain {
         signal: controller.signal,
       });
       this.noteCompletedRepairs(turn);
+      this.noteAcceptedTasks(turn);
       return turn;
     } catch (error) {
       if (controller.signal.aborted) return null;
@@ -419,6 +485,7 @@ export class MomoBrain {
       this.pendingBodyEvents = [];
       this.pendingTaskEvents = [];
       this.pendingPlayerGoals = [];
+      this.awaitingTaskIds.clear();
       this.failureSignatures.clear();
       this.activeTaskRecoveryEpoch = null;
       this.taskRecoveryPermissionEpoch = null;
@@ -453,11 +520,20 @@ export class MomoBrain {
   }
 
   async handleTaskEvent(event) {
+    const supervised = this.activityMode === "supervised";
+    const accepted = !supervised || this.hasAwaitingTask(event.taskId);
     if (event.status === "stopped") {
+      const matched = this.consumeAwaitingTask(event.taskId);
+      if (supervised && !matched) {
+        return { interrupted: false, stopped: true, held: true };
+      }
       this.refreshGoalLease(false);
       return { interrupted: false, stopped: true };
     }
-    if (!this.continuationAllowed()) {
+    if (
+      (supervised && !accepted) ||
+      (!this.continuationAllowed() && !accepted)
+    ) {
       return { interrupted: false, held: true };
     }
     const thread = this.ensureThread();
@@ -486,6 +562,7 @@ export class MomoBrain {
       }
       return { interrupted: true };
     }
+    this.consumeAwaitingTask(event.taskId);
     if (!sentChat(turn)) {
       turn = await this.runTurn(
         `Task event ${event.id} still has no player-visible update. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, recovery update, or obstacle. Do not only describe what you would say.`,
@@ -579,15 +656,49 @@ export class MomoBrain {
     }
   }
 
+  pruneAwaitingTasks(now = Date.now()) {
+    for (const [taskId, expiresAt] of this.awaitingTaskIds) {
+      if (expiresAt <= now) this.awaitingTaskIds.delete(taskId);
+    }
+  }
+
+  noteAcceptedTasks(turn, now = Date.now()) {
+    this.pruneAwaitingTasks(now);
+    for (const taskId of acceptedNumenTaskIds(turn)) {
+      this.awaitingTaskIds.set(taskId, now + ACCEPTED_TASK_TTL_MS);
+    }
+  }
+
+  hasAwaitingTask(taskId, now = Date.now()) {
+    this.pruneAwaitingTasks(now);
+    return (
+      typeof taskId === "string" &&
+      this.awaitingTaskIds.has(taskId)
+    );
+  }
+
+  consumeAwaitingTask(taskId) {
+    return (
+      typeof taskId === "string" &&
+      this.awaitingTaskIds.delete(taskId)
+    );
+  }
+
   noteBodyEvent(event) {
+    if (!this.continuationAllowed()) {
+      this.pendingBodyEvents = [];
+      return false;
+    }
     this.pendingBodyEvents.push(event);
     if (this.pendingBodyEvents.length > 24) {
       this.pendingBodyEvents.splice(0, this.pendingBodyEvents.length - 24);
     }
+    return true;
   }
 
   async handleBodyEvent(event) {
     if (!this.continuationAllowed()) {
+      this.pendingBodyEvents = [];
       return { interrupted: false, held: true };
     }
     this.noteBodyEvent(event);
@@ -625,6 +736,7 @@ export class MomoBrain {
       deferredPlayerGoal == null ? [] : [deferredPlayerGoal];
     const epoch = this.interruptEpoch;
     let turn;
+    let contextReconciled = false;
     try {
       turn = await this.runTurn(
         bodyEventPrompt(
@@ -640,6 +752,12 @@ export class MomoBrain {
         epoch,
         thread,
       );
+      if (turn != null) {
+        contextReconciled = true;
+        for (const entry of interruptedTasks) {
+          this.consumeAwaitingTask(entry.event?.taskId);
+        }
+      }
       if (deferredPlayerGoal != null && turn != null && !sentChat(turn)) {
         turn = await this.runTurn(
           `Recovery for deferred player event ${JSON.stringify(deferredPlayerGoal.event?.id)} did not acknowledge its speaker. Call numen.send_chat now as ${JSON.stringify(this.companion)} with one concise truthful update: either the accepted/current action, the verified result, or the specific obstacle. Do not claim an action started unless a tool actually accepted it.`,
@@ -654,13 +772,17 @@ export class MomoBrain {
       }
     } catch (error) {
       this.pendingBodyEvents.unshift(...events);
-      this.pendingTaskEvents.unshift(...interruptedTasks);
+      if (!contextReconciled) {
+        this.pendingTaskEvents.unshift(...interruptedTasks);
+      }
       this.restoreDeferredPlayerGoals(deferredPlayerGoals);
       throw error;
     }
     if (turn == null) {
       this.pendingBodyEvents.unshift(...events);
-      this.pendingTaskEvents.unshift(...interruptedTasks);
+      if (!contextReconciled) {
+        this.pendingTaskEvents.unshift(...interruptedTasks);
+      }
       this.restoreDeferredPlayerGoals(deferredPlayerGoals);
       return { interrupted: true };
     }

@@ -3,12 +3,13 @@ import test from "node:test";
 
 import { EventInbox } from "../src/event-inbox.mjs";
 
-test("stop fence removes stale player chat but keeps task events", async () => {
+test("stop fence removes stale player and console chat but keeps task events", async () => {
   const inbox = new EventInbox();
+  inbox.push({ event: { id: 19, type: "console_chat", message: "继续挖" } });
   inbox.push({ event: { id: 20, type: "player_chat", message: "跟着我" } });
   inbox.push({ event: { id: 21, type: "task_finished" } });
 
-  inbox.cancelPlayerChatsThrough(22);
+  inbox.cancelChatsThrough(22);
   const batch = await inbox.takeAll();
   assert.deepEqual(batch.map((item) => item.event.id), [21]);
   assert.equal(
@@ -75,7 +76,7 @@ test("body telemetry queued before a same-cycle fresh test remains stale", async
   );
 });
 
-test("stopped task events never enter task recovery", async () => {
+test("stopped task events reach the brain worker for task-id cleanup", async () => {
   const inbox = new EventInbox();
   assert.equal(
     inbox.push({
@@ -86,10 +87,9 @@ test("stopped task events never enter task recovery", async () => {
         status: "stopped",
       },
     }),
-    false,
+    true,
   );
-  inbox.close();
-  assert.deepEqual(await inbox.takeAll(), []);
+  assert.equal((await inbox.takeAll())[0].event.status, "stopped");
 });
 
 test("closing wakes an empty inbox", async () => {

@@ -16,6 +16,10 @@ test("direct stop phrases are intercepted without catching unrelated chat", () =
     parseStopRequest({ ...event, message: "桃桃停止下雨" }),
     null,
   );
+  assert.deepEqual(
+    parseStopRequest({ type: "console_chat", message: "停下" }),
+    { type: "stop" },
+  );
 });
 
 test("stop gateway interrupts the active task before acknowledging", async () => {
