@@ -248,12 +248,15 @@ export class MomoBrain {
     companion,
     persona = "",
     activityMode = "autonomous",
+    threadSelection = () => ({ revision: "static" }),
   ) {
     this.startThread = startThread;
+    this.threadSelection = threadSelection;
     this.companion = companion;
     this.persona = persona;
     this.activityMode = activityMode;
     this.thread = null;
+    this.threadSelectionRevision = null;
     this.activeController = null;
     this.interruptEpoch = 0;
     this.pendingBodyEvents = [];
@@ -335,12 +338,29 @@ export class MomoBrain {
     return interrupted;
   }
 
-  async runTurn(prompt, epoch) {
+  ensureThread() {
+    const selection = this.threadSelection();
+    const revision = String(selection?.revision ?? "static");
+    if (
+      this.thread == null ||
+      this.threadSelectionRevision !== revision
+    ) {
+      const previousThreadId = this.thread?.id ?? null;
+      this.thread = this.startThread(selection, previousThreadId);
+      this.threadSelectionRevision = revision;
+    }
+    return this.thread;
+  }
+
+  async runTurn(prompt, epoch, thread = null) {
     if (epoch !== this.interruptEpoch) return null;
+    const selectedThread = thread ?? this.ensureThread();
     const controller = new AbortController();
     this.activeController = controller;
     try {
-      const turn = await this.thread.run(prompt, { signal: controller.signal });
+      const turn = await selectedThread.run(prompt, {
+        signal: controller.signal,
+      });
       this.noteCompletedRepairs(turn);
       return turn;
     } catch (error) {
@@ -356,13 +376,14 @@ export class MomoBrain {
   async handle(event, decision) {
     if (decision.route === "ignore") return;
     if (decision.route === "act") this.beginExplicitGoal();
-    if (this.thread == null) this.thread = this.startThread();
+    const thread = this.ensureThread();
     const epoch = this.interruptEpoch;
     this.activePlayerGoalEpoch = epoch;
     try {
       let turn = await this.runTurn(
         eventPrompt(this.companion, event, decision, this.persona),
         epoch,
+        thread,
       );
       if (turn == null) {
         this.deferPlayerGoalIfPermitted(epoch, event, decision);
@@ -372,6 +393,7 @@ export class MomoBrain {
         turn = await this.runTurn(
           `You did not send any player-visible chat for event ${event.id}. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise, natural acknowledgement or answer. Do not only describe what you would say.`,
           epoch,
+          thread,
         );
       }
       if (turn == null) {
@@ -405,18 +427,20 @@ export class MomoBrain {
       this.supervisedGoalActive = false;
     }
     this.beginExplicitGoal();
-    if (this.thread == null) this.thread = this.startThread();
+    const thread = this.ensureThread();
     const epoch = this.interruptEpoch;
 
     let turn = await this.runTurn(
       testInstructionPrompt(this.companion, event, this.persona),
       epoch,
+      thread,
     );
     if (turn == null) return { interrupted: true };
     if (!sentChat(turn)) {
       turn = await this.runTurn(
         `Test instruction ${JSON.stringify(event.runId)} has no player-visible update yet. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, accepted-action update, ambiguity, or obstacle. Do not claim that an action started unless its tool returned an accepted task_id.`,
         epoch,
+        thread,
       );
     }
     if (turn == null) return { interrupted: true };
@@ -436,7 +460,7 @@ export class MomoBrain {
     if (!this.continuationAllowed()) {
       return { interrupted: false, held: true };
     }
-    if (this.thread == null) this.thread = this.startThread();
+    const thread = this.ensureThread();
     const epoch = this.interruptEpoch;
     const recovery = this.noteTaskFailure(event);
 
@@ -446,6 +470,7 @@ export class MomoBrain {
       turn = await this.runTurn(
         taskEventPrompt(this.companion, event, this.persona, recovery),
         epoch,
+        thread,
       );
     } catch (error) {
       this.queueTaskEvent(event, recovery);
@@ -465,6 +490,7 @@ export class MomoBrain {
       turn = await this.runTurn(
         `Task event ${event.id} still has no player-visible update. Call numen.send_chat now as ${JSON.stringify(this.companion)} with a concise verified result, recovery update, or obstacle. Do not only describe what you would say.`,
         epoch,
+        thread,
       );
     }
     if (turn == null) {
@@ -591,7 +617,7 @@ export class MomoBrain {
   }
 
   async drainOneBodyContext() {
-    if (this.thread == null) this.thread = this.startThread();
+    const thread = this.ensureThread();
     const events = this.pendingBodyEvents.splice(0);
     const interruptedTasks = this.pendingTaskEvents.splice(0);
     const deferredPlayerGoal = this.pendingPlayerGoals.shift();
@@ -612,11 +638,13 @@ export class MomoBrain {
           this.persona,
         ),
         epoch,
+        thread,
       );
       if (deferredPlayerGoal != null && turn != null && !sentChat(turn)) {
         turn = await this.runTurn(
           `Recovery for deferred player event ${JSON.stringify(deferredPlayerGoal.event?.id)} did not acknowledge its speaker. Call numen.send_chat now as ${JSON.stringify(this.companion)} with one concise truthful update: either the accepted/current action, the verified result, or the specific obstacle. Do not claim an action started unless a tool actually accepted it.`,
           epoch,
+          thread,
         );
       }
       if (deferredPlayerGoal != null && turn != null && !sentChat(turn)) {
@@ -657,7 +685,54 @@ export class MomoBrain {
   }
 }
 
-export function createCodexRuntimes(Codex, config, persona = "") {
+function missingResumedHistory(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /\bno\s+(?:persisted\s+)?rollout\b.{0,120}\bfound\b/iu.test(message) ||
+    /\b(?:thread|rollout|session)\b.{0,120}\b(?:not found|does not exist|missing)\b/iu.test(
+      message,
+    ) ||
+    /\b(?:not found|does not exist|missing)\b.{0,120}\b(?:thread|rollout|session)\b/iu.test(
+      message,
+    ) ||
+    /\b(?:failed|unable)\s+to\s+find\b.{0,120}\b(?:thread|rollout|session)\b/iu.test(
+      message,
+    )
+  );
+}
+
+function resumeThreadWithMissingHistoryFallback(
+  codex,
+  threadId,
+  options,
+) {
+  let thread = codex.resumeThread(threadId, options);
+  let firstRun = true;
+  return {
+    get id() {
+      return thread.id;
+    },
+
+    async run(prompt, turnOptions) {
+      const mayFallback = firstRun;
+      firstRun = false;
+      try {
+        return await thread.run(prompt, turnOptions);
+      } catch (error) {
+        if (!mayFallback || !missingResumedHistory(error)) throw error;
+        thread = codex.startThread(options);
+        return await thread.run(prompt, turnOptions);
+      }
+    },
+  };
+}
+
+export function createCodexRuntimes(
+  Codex,
+  config,
+  persona = "",
+  modelSelection = null,
+) {
   const commonConfig = {
     features: {
       shell_tool: false,
@@ -681,6 +756,7 @@ export function createCodexRuntimes(Codex, config, persona = "") {
       "create_companion",
       "delete_companion",
       "run_command",
+      "report_brain_config_state",
     ],
     ...(config.mcpToken
       ? { bearer_token_env_var: "NUMEN_MCP_TOKEN" }
@@ -706,21 +782,51 @@ export function createCodexRuntimes(Codex, config, persona = "") {
       skipGitRepoCheck: true,
     }),
   );
+  const staticSelection = Object.freeze({
+    model: config.agentModel,
+    reasoning: config.agentReasoning,
+    revision: "config",
+  });
+  const selectionSource = modelSelection ?? {
+    snapshot() {
+      return staticSelection;
+    },
+  };
+  const gameplayThreadOptions = (selection) => ({
+    model: selection.model,
+    modelReasoningEffort: selection.reasoning,
+    sandboxMode: "read-only",
+    approvalPolicy: "never",
+    webSearchMode: "disabled",
+    networkAccessEnabled: false,
+    workingDirectory: config.workingDirectory,
+    skipGitRepoCheck: true,
+  });
   const brain = new MomoBrain(
-    () =>
-      agentCodex.startThread({
-        model: config.agentModel,
-        modelReasoningEffort: config.agentReasoning,
-        sandboxMode: "read-only",
-        approvalPolicy: "never",
-        webSearchMode: "disabled",
-        networkAccessEnabled: false,
-        workingDirectory: config.workingDirectory,
-        skipGitRepoCheck: true,
-      }),
+    (selection, previousThreadId) => {
+      const options = gameplayThreadOptions(selection);
+      if (
+        typeof previousThreadId === "string" &&
+        previousThreadId !== "" &&
+        typeof agentCodex.resumeThread === "function"
+      ) {
+        try {
+          return resumeThreadWithMissingHistoryFallback(
+            agentCodex,
+            previousThreadId,
+            options,
+          );
+        } catch {
+          // A missing/unsupported persisted thread must not prevent the newly
+          // selected model from serving the next event.
+        }
+      }
+      return agentCodex.startThread(options);
+    },
     config.companion,
     persona,
     config.activityMode,
+    () => selectionSource.snapshot(),
   );
   return { router, brain };
 }

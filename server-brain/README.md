@@ -44,6 +44,32 @@ the defaults are `gpt-5.4-mini` at low reasoning and `gpt-5.6-luna` at high
 reasoning. The gameplay persona lives in `persona/momo.md` and is injected into
 every handled event.
 
+## Hot model selection
+
+The gameplay model and reasoning effort can be changed without restarting the
+sidecar or interrupting an active turn. The Forge control plane publishes a
+trusted `brain_config_request`; the sidecar validates the complete
+model/reasoning pair, atomically persists it, and only then acknowledges it
+through `report_brain_config_state`. The next logical gameplay event resumes
+the existing Codex thread id with the new options, preserving Minecraft task
+context. If that id is unavailable, a new thread is started.
+Because the SDK validates persisted history on the resumed thread's first
+`run`, the sidecar retries that same prompt once on a new thread only when the
+error explicitly says the thread or rollout is missing. Model, capacity, tool,
+and ordinary turn failures are never retried by this fallback.
+
+Phase one intentionally exposes only combinations verified for this host:
+
+- `gpt-5.6-luna`: `low`, `medium`, `high`, `xhigh`
+- `gpt-5.3-codex-spark`: `low`, `medium`, `high`, `xhigh`
+
+The authoritative selection lives in
+`runtime/model-selection.json` by default. `MOMO_AGENT_MODEL` and
+`MOMO_AGENT_REASONING` are bootstrap values used only when that state file does
+not exist; hot switching never edits `.env`. Every request has a short expiry,
+and `set` requires both fields so a model/reasoning combination cannot tear.
+Startup and MCP recovery both re-announce the current selection and catalog.
+
 ## Restricted operator commands
 
 The command bridge is disabled until `MOMO_COMMAND_PLAYERS` contains an exact

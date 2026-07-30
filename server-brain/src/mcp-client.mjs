@@ -64,6 +64,10 @@ export class NumenMcpClient {
     return this.callTool("send_chat", { companion, message });
   }
 
+  async reportBrainConfigState(report) {
+    return this.callTool("report_brain_config_state", report);
+  }
+
   async runCommand(companion, command) {
     return this.callTool("run_command", { companion, command });
   }

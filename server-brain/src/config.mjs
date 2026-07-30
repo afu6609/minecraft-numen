@@ -1,6 +1,12 @@
 import path from "node:path";
 
-const REASONING_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh"]);
+const REASONING_EFFORTS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 const ACTIVITY_MODES = new Set(["supervised", "autonomous"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -95,6 +101,10 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     personaFile: path.resolve(
       workingDirectory,
       env.MOMO_PERSONA_FILE?.trim() || "persona/momo.md",
+    ),
+    modelStateFile: path.resolve(
+      workingDirectory,
+      env.MOMO_MODEL_STATE_FILE?.trim() || "runtime/model-selection.json",
     ),
   });
 }

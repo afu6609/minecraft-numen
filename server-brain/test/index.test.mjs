@@ -26,6 +26,7 @@ const required = [
   "combat_policy_status",
   "activate_combat_policy",
   "abort_combat_policy",
+  "report_brain_config_state",
 ];
 
 function client(names) {

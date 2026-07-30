@@ -7,6 +7,11 @@ import { loadConfig } from "./config.mjs";
 import { EventInbox } from "./event-inbox.mjs";
 import { NumenMcpClient } from "./mcp-client.mjs";
 import {
+  AgentModelSelectionStore,
+  BrainConfigGateway,
+  decodeBrainConfigRequest,
+} from "./model-control.mjs";
+import {
   parseServerCommandRequest,
   ServerCommandGateway,
 } from "./server-command.mjs";
@@ -70,6 +75,7 @@ export async function verifyMcp(client) {
     "combat_policy_status",
     "activate_combat_policy",
     "abort_combat_policy",
+    "report_brain_config_state",
   ]) {
     if (!names.has(required)) {
       throw new Error(
@@ -90,11 +96,25 @@ export async function run({
     timeoutMs: config.mcpTimeoutMs,
   });
   await verifyMcp(client);
+  const modelSelection = await AgentModelSelectionStore.open(
+    config.modelStateFile,
+    {
+      model: config.agentModel,
+      reasoning: config.agentReasoning,
+    },
+  );
+  const brainConfigGateway = new BrainConfigGateway(client, modelSelection);
+  await brainConfigGateway.announce();
 
   const { Codex } = await importCodex();
   const persona = (await readFile(config.personaFile, "utf8")).trim();
   if (persona === "") throw new Error("MOMO_PERSONA_FILE must not be empty");
-  const { router, brain } = createCodexRuntimes(Codex, config, persona);
+  const { router, brain } = createCodexRuntimes(
+    Codex,
+    config,
+    persona,
+    modelSelection,
+  );
   const refreshGoalLease = async (reason) => {
     if (config.activityMode !== "supervised") return;
     try {
@@ -127,8 +147,9 @@ export async function run({
     companion: config.companion,
     activityMode: config.activityMode,
     classifierModel: config.classifierModel,
-    agentModel: config.agentModel,
-    agentReasoning: config.agentReasoning,
+    agentModel: modelSelection.snapshot().model,
+    agentReasoning: modelSelection.snapshot().reasoning,
+    modelRevision: modelSelection.snapshot().revision,
     commandPlayers: config.commandPlayers,
   });
 
@@ -199,6 +220,47 @@ export async function run({
             eventIndex += 1
           ) {
             const event = events[eventIndex];
+            const decodedBrainConfig = decodeBrainConfigRequest(event);
+            if (decodedBrainConfig.kind !== "other") {
+              try {
+                const result =
+                  decodedBrainConfig.kind === "invalid"
+                    ? await brainConfigGateway.reject(decodedBrainConfig)
+                    : await brainConfigGateway.handle(
+                        decodedBrainConfig.request,
+                      );
+                log(
+                  result.success ? "info" : "warn",
+                  "brain config handled",
+                  {
+                    eventId: event.id,
+                    requestId:
+                      decodedBrainConfig.request?.requestId ??
+                      decodedBrainConfig.requestId,
+                    action: decodedBrainConfig.request?.action ?? "invalid",
+                    success: result.success,
+                    applied: result.applied,
+                    error: result.error,
+                    ...result.current,
+                  },
+                );
+              } catch (error) {
+                // The MCP event has already been drained. Retain it and every
+                // later event locally; BrainConfigGateway also retains the
+                // already-applied ACK so a retry cannot change its result.
+                deferredServerEvents = events.slice(eventIndex);
+                log("warn", "brain config acknowledgement deferred", {
+                  eventId: event.id,
+                  requestId:
+                    decodedBrainConfig.request?.requestId ??
+                    decodedBrainConfig.requestId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+                if (once) throw error;
+                break;
+              }
+              continue;
+            }
             const decodedTestInstruction = decodeTestInstructionEvent(
               event,
               config.companion,
@@ -274,6 +336,13 @@ export async function run({
               commandRequest,
             });
           }
+          if (consecutiveErrors > 0) {
+            await brainConfigGateway.announce();
+            log("info", "brain config state re-announced after MCP recovery", {
+              previousErrors: consecutiveErrors,
+              ...modelSelection.snapshot(),
+            });
+          }
           consecutiveErrors = 0;
           if (!once && !stopping) {
             await delay(config.pollIntervalMs);
@@ -324,7 +393,8 @@ export async function run({
         }
       }
 
-      for (const { event, decision, commandRequest } of pending) {
+      for (const item of pending) {
+        const { event, decision, commandRequest } = item;
         if (inbox.isCancelled(event)) {
           log("info", "stale event cancelled by control fence", {
             eventId: event.id,

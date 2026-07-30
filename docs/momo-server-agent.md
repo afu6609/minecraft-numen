@@ -35,6 +35,30 @@ real-time behavior stay deterministic in the Forge process. The model is called
 only for player messages, planning boundaries, significant failures, and task
 completion.
 
+## Runtime model control
+
+Operators and the dedicated-server console can inspect and atomically change
+the sidecar's active execution model/reasoning pair:
+
+```text
+momo brain status
+momo brain list
+momo brain set <model> <reasoning>
+```
+
+The command requires permission level 4 and uses the global
+`poll_server_events` transport, so it works without a live companion body. A
+command only queues a `brain_config_request` with a 30-second apply deadline;
+Forge never claims that its own local state switched. The sidecar applies or
+rejects the complete pair, then calls the companion-independent
+`report_brain_config_state` MCP control tool. Forge keeps a further 30-second
+acknowledgement grace period for a result that was durably applied before the
+deadline but whose report is being retried. Only a matching, non-stale, applied
+acknowledgement updates the cached authoritative state and produces a success
+response for the originating console or player UUID. Startup reports populate
+the model/effort catalog, and `status`/`list` still request a fresh report every
+time.
+
 ## Optional client compatibility
 
 The dedicated-server build accepts clients that do not advertise Numen's custom

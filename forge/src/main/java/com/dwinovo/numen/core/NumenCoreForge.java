@@ -8,6 +8,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDamageEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.common.Mod;
@@ -34,11 +35,22 @@ public class NumenCoreForge {
 
         MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onServerTickPost);
         MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onLivingDamage);
+        MinecraftForge.EVENT_BUS.addListener((ServerStartedEvent e) ->
+                com.dwinovo.numen.core.server.BrainConfigCommands.bindServer(
+                        e.getServer()));
         // Release pathfinding chunk-ref snapshots when the server stops (don't pin an old world).
-        MinecraftForge.EVENT_BUS.addListener((ServerStoppedEvent e) -> PathCaches.dropAll());
+        MinecraftForge.EVENT_BUS.addListener((ServerStoppedEvent e) -> {
+            PathCaches.dropAll();
+            com.dwinovo.numen.core.server.BrainConfigCommands.unbindServer(
+                    e.getServer());
+        });
         // Debug verbs merged into the /numen root registered by the engine mod.
-        MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.RegisterCommandsEvent e) ->
-                com.dwinovo.numen.core.debug.DebugCommands.register(e.getDispatcher()));
+        MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.RegisterCommandsEvent e) -> {
+            com.dwinovo.numen.core.debug.DebugCommands.register(
+                    e.getDispatcher());
+            com.dwinovo.numen.core.server.BrainConfigCommands.register(
+                    e.getDispatcher());
+        });
 
         // Client-only: declare core's built-in skills, read in place from the
         // skills/ dir bundled in this jar. Skills feed the client-side LLM, so
@@ -67,6 +79,7 @@ public class NumenCoreForge {
         // 排程机器的心跳随机器归了 numen-api;core 只 tick 自己的工具配套。
         ScanBlocksJob.tick(server);
         PathCaches.serverTick(server);
+        com.dwinovo.numen.core.server.BrainConfigCommands.serverTick(server);
         // Debug particles for pathing state, sent only to players with debug on.
         com.dwinovo.numen.core.debug.PathDebugRenderer.serverTick(server);
     }

@@ -61,6 +61,7 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
       "create_companion",
       "delete_companion",
       "run_command",
+      "report_brain_config_state",
     ],
   );
   assert.equal(
@@ -75,6 +76,278 @@ test("Codex runtimes isolate the classifier and expose only Numen to the agent",
     ),
     false,
   );
+});
+
+test("model revision waits for the next logical event and resumes context", async () => {
+  let selection = {
+    model: "gpt-5.6-luna",
+    reasoning: "high",
+    revision: "1",
+  };
+  let releaseFirstTurn;
+  let firstTurnStarted;
+  const firstStarted = new Promise((resolve) => {
+    firstTurnStarted = resolve;
+  });
+  const starts = [];
+  const resumes = [];
+  let oldRuns = 0;
+
+  class FakeCodex {
+    constructor() {
+      this.agent = starts.length === 0 && FakeCodex.instances++ === 1;
+    }
+
+    startThread(options) {
+      if (!this.agent) throw new Error("classifier is unused");
+      starts.push(options);
+      return {
+        id: "minecraft-context",
+        async run() {
+          oldRuns += 1;
+          if (oldRuns === 1) {
+            firstTurnStarted();
+            await new Promise((resolve) => {
+              releaseFirstTurn = resolve;
+            });
+            return { items: [] };
+          }
+          return completedChatTurn();
+        },
+      };
+    }
+
+    resumeThread(id, options) {
+      if (!this.agent) throw new Error("classifier is unused");
+      resumes.push({ id, options });
+      return {
+        id,
+        async run() {
+          return completedChatTurn();
+        },
+      };
+    }
+
+    static instances = 0;
+  }
+
+  const { brain } = createCodexRuntimes(
+    FakeCodex,
+    {
+      mcpUrl: "http://127.0.0.1:8765/mcp",
+      mcpToken: "",
+      agentToolTimeoutSeconds: 330,
+      classifierModel: "gpt-5.4-mini",
+      classifierReasoning: "low",
+      agentModel: "gpt-5.6-luna",
+      agentReasoning: "high",
+      workingDirectory: "/srv/momo",
+      companion: "momo",
+      activityMode: "supervised",
+    },
+    "",
+    {
+      snapshot() {
+        return selection;
+      },
+    },
+  );
+
+  const inFlight = brain.handle(
+    { id: 1, playerName: "Alex", message: "你好" },
+    { id: 1, route: "reply", reason: "greeting" },
+  );
+  await firstStarted;
+  selection = {
+    model: "gpt-5.3-codex-spark",
+    reasoning: "high",
+    revision: "2",
+  };
+  assert.equal(resumes.length, 0);
+  releaseFirstTurn();
+  await inFlight;
+
+  // The corrective SDK turn belongs to the same logical event and therefore
+  // remains on the already-running Luna thread.
+  assert.equal(oldRuns, 2);
+  assert.equal(resumes.length, 0);
+
+  await brain.handle(
+    { id: 2, playerName: "Alex", message: "再说一次" },
+    { id: 2, route: "reply", reason: "follow-up" },
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0].id, "minecraft-context");
+  assert.equal(resumes[0].options.model, "gpt-5.3-codex-spark");
+  assert.equal(resumes[0].options.modelReasoningEffort, "high");
+});
+
+test("missing resumed rollout retries the same prompt once on a new thread", async () => {
+  let selection = {
+    model: "gpt-5.6-luna",
+    reasoning: "high",
+    revision: "1",
+  };
+  const starts = [];
+  const resumes = [];
+  const resumedPrompts = [];
+  const fallbackPrompts = [];
+
+  class FakeCodex {
+    constructor() {
+      this.agent = FakeCodex.instances++ === 1;
+    }
+
+    startThread(options) {
+      if (!this.agent) throw new Error("classifier is unused");
+      starts.push({ options });
+      const first = starts.length === 1;
+      return {
+        id: first ? "missing-context" : "replacement-context",
+        async run(prompt) {
+          if (!first) fallbackPrompts.push(prompt);
+          return completedChatTurn();
+        },
+      };
+    }
+
+    resumeThread(id, options) {
+      resumes.push({ id, options });
+      return {
+        id,
+        async run(prompt) {
+          resumedPrompts.push(prompt);
+          throw new Error(`No rollout found for thread ${id}`);
+        },
+      };
+    }
+
+    static instances = 0;
+  }
+
+  const { brain } = createCodexRuntimes(
+    FakeCodex,
+    {
+      mcpUrl: "http://127.0.0.1:8765/mcp",
+      mcpToken: "",
+      agentToolTimeoutSeconds: 330,
+      classifierModel: "gpt-5.4-mini",
+      classifierReasoning: "low",
+      agentModel: "gpt-5.6-luna",
+      agentReasoning: "high",
+      workingDirectory: "/srv/momo",
+      companion: "momo",
+      activityMode: "supervised",
+    },
+    "",
+    {
+      snapshot() {
+        return selection;
+      },
+    },
+  );
+
+  await brain.handle(
+    { id: 1, playerName: "Alex", message: "你好" },
+    { id: 1, route: "reply", reason: "greeting" },
+  );
+  selection = {
+    model: "gpt-5.3-codex-spark",
+    reasoning: "medium",
+    revision: "2",
+  };
+  await brain.handle(
+    { id: 2, playerName: "Alex", message: "继续" },
+    { id: 2, route: "reply", reason: "follow-up" },
+  );
+
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0].id, "missing-context");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].options, resumes[0].options);
+  assert.equal(starts[1].options.model, "gpt-5.3-codex-spark");
+  assert.deepEqual(fallbackPrompts, resumedPrompts);
+});
+
+test("ordinary first resumed-turn failures are never retried", async () => {
+  let selection = {
+    model: "gpt-5.6-luna",
+    reasoning: "high",
+    revision: "1",
+  };
+  let starts = 0;
+  let resumes = 0;
+
+  class FakeCodex {
+    constructor() {
+      this.agent = FakeCodex.instances++ === 1;
+    }
+
+    startThread() {
+      if (!this.agent) throw new Error("classifier is unused");
+      starts += 1;
+      return {
+        id: "healthy-context",
+        async run() {
+          return completedChatTurn();
+        },
+      };
+    }
+
+    resumeThread(id) {
+      resumes += 1;
+      return {
+        id,
+        async run() {
+          throw new Error("model capacity temporarily unavailable");
+        },
+      };
+    }
+
+    static instances = 0;
+  }
+
+  const { brain } = createCodexRuntimes(
+    FakeCodex,
+    {
+      mcpUrl: "http://127.0.0.1:8765/mcp",
+      mcpToken: "",
+      agentToolTimeoutSeconds: 330,
+      classifierModel: "gpt-5.4-mini",
+      classifierReasoning: "low",
+      agentModel: "gpt-5.6-luna",
+      agentReasoning: "high",
+      workingDirectory: "/srv/momo",
+      companion: "momo",
+      activityMode: "supervised",
+    },
+    "",
+    {
+      snapshot() {
+        return selection;
+      },
+    },
+  );
+
+  await brain.handle(
+    { id: 1, playerName: "Alex", message: "你好" },
+    { id: 1, route: "reply", reason: "greeting" },
+  );
+  selection = {
+    model: "gpt-5.3-codex-spark",
+    reasoning: "medium",
+    revision: "2",
+  };
+  await assert.rejects(
+    brain.handle(
+      { id: 2, playerName: "Alex", message: "继续" },
+      { id: 2, route: "reply", reason: "follow-up" },
+    ),
+    /model capacity temporarily unavailable/,
+  );
+  assert.equal(resumes, 1);
+  assert.equal(starts, 1);
 });
 
 test("brain makes one corrective turn when the agent forgets visible chat", async () => {

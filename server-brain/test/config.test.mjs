@@ -19,6 +19,10 @@ test("configuration defaults to loopback and split models", () => {
     config.personaFile,
     path.join(config.workingDirectory, "persona", "momo.md"),
   );
+  assert.equal(
+    config.modelStateFile,
+    path.join(config.workingDirectory, "runtime", "model-selection.json"),
+  );
 });
 
 test("activity mode is supervised by default and explicitly opt-in autonomous", () => {
@@ -34,12 +38,12 @@ test("activity mode is supervised by default and explicitly opt-in autonomous", 
 
 test("reasoning effort matches Codex-supported values", () => {
   assert.equal(
-    loadConfig({ MOMO_CLASSIFIER_REASONING: "none" }).classifierReasoning,
-    "none",
+    loadConfig({ MOMO_CLASSIFIER_REASONING: "minimal" }).classifierReasoning,
+    "minimal",
   );
   assert.throws(
-    () => loadConfig({ MOMO_CLASSIFIER_REASONING: "minimal" }),
-    /must be one of none, low, medium, high, xhigh/,
+    () => loadConfig({ MOMO_CLASSIFIER_REASONING: "none" }),
+    /must be one of minimal, low, medium, high, xhigh/,
   );
 });
 
