@@ -2,6 +2,7 @@ package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.core.task.BlockMiningProgress;
+import com.dwinovo.numen.core.task.PlayerInv;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -72,11 +73,9 @@ public final class PerceptionTools {
         // Full backpack inventory (empty slots omitted).
         var inv = self.getInventory();
         JsonArray items = new JsonArray();
-        int used = 0;
-        for (int i = 0; i < inv.getContainerSize(); i++) {
-            ItemStack s = inv.getItem(i);
+        for (int i = 0; i < inv.items.size(); i++) {
+            ItemStack s = inv.items.get(i);
             if (s.isEmpty()) continue;
-            used++;
             JsonObject o = new JsonObject();
             o.addProperty("slot", i);
             o.addProperty("item", BuiltInRegistries.ITEM.getKey(s.getItem()).toString());
@@ -84,9 +83,13 @@ public final class PerceptionTools {
             items.add(o);
         }
         JsonObject inventory = new JsonObject();
+        int used = PlayerInv.mainSlotsUsed(inv);
+        int total = inv.items.size();
         inventory.add("items", items);
         inventory.addProperty("slots_used", used);
-        inventory.addProperty("slots_total", inv.getContainerSize());
+        inventory.addProperty("slots_total", total);
+        inventory.addProperty("slots_free", total - used);
+        inventory.addProperty("main_inventory_no_empty_slots", used == total);
         root.add("inventory", inventory);
 
         // A player body has no AI attack-target; combat is task-driven.

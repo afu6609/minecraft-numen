@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.entity.NumenPlayer;
+import com.dwinovo.numen.core.task.PlayerInv;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -82,21 +83,23 @@ final class PlayerPerception {
 
         var inventory = player.getInventory();
         JsonArray items = new JsonArray();
-        int used = 0;
-        for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
-            ItemStack stack = inventory.getItem(slot);
+        for (int slot = 0; slot < inventory.items.size(); slot++) {
+            ItemStack stack = inventory.items.get(slot);
             if (stack.isEmpty()) continue;
-            used++;
             JsonObject item = stack(stack);
             item.addProperty("slot", slot);
             item.addProperty("section", inventorySection(slot));
             items.add(item);
         }
         JsonObject backpack = new JsonObject();
+        int used = PlayerInv.mainSlotsUsed(inventory);
+        int total = inventory.items.size();
         backpack.add("items", items);
         backpack.addProperty("selected_hotbar_slot", inventory.selected);
         backpack.addProperty("slots_used", used);
-        backpack.addProperty("slots_total", inventory.getContainerSize());
+        backpack.addProperty("slots_total", total);
+        backpack.addProperty("slots_free", total - used);
+        backpack.addProperty("main_inventory_no_empty_slots", used == total);
         root.add("inventory", backpack);
 
         JsonArray effects = new JsonArray();

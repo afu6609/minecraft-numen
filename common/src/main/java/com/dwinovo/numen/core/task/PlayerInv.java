@@ -4,6 +4,8 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
+import java.util.List;
+
 /**
  * Small adapter giving the companion task layer the {@code SimpleContainer}-style
  * inventory operations it grew up on (count / remove-by-type / add-with-leftover)
@@ -57,5 +59,76 @@ public final class PlayerInv {
     public static ItemStack add(Inventory inv, ItemStack stack) {
         inv.add(stack);
         return stack;   // Inventory.add consumed what fit; remainder stays here
+    }
+
+    /** Number of occupied slots in the 36-slot pickup-capable main inventory. */
+    public static int mainSlotsUsed(Inventory inv) {
+        int used = 0;
+        for (ItemStack stack : inv.items) {
+            if (!stack.isEmpty()) used++;
+        }
+        return used;
+    }
+
+    /** Number of empty slots in the 36-slot pickup-capable main inventory. */
+    public static int mainSlotsFree(Inventory inv) {
+        return inv.items.size() - mainSlotsUsed(inv);
+    }
+
+    /** Count all units of one item id in the 36-slot backpack. */
+    public static int mainCount(
+            Inventory inv,
+            Item item) {
+        return mainCount(inv.items, item);
+    }
+
+    static int mainCount(
+            List<ItemStack> mainSlots,
+            Item item) {
+        if (item == null) return 0;
+        int count = 0;
+        for (ItemStack existing : mainSlots) {
+            if (!existing.isEmpty() && existing.is(item)) {
+                count += existing.getCount();
+            }
+        }
+        return count;
+    }
+
+    /**
+     * How many items matching {@code incoming} can still enter the normal
+     * backpack. Armor and offhand slots deliberately do not count: vanilla
+     * {@link Inventory#add(ItemStack)} does not use them for ground pickup.
+     */
+    public static int mainCapacityFor(
+            Inventory inv,
+            ItemStack incoming) {
+        return mainCapacityFor(inv.items, incoming);
+    }
+
+    static int mainCapacityFor(
+            List<ItemStack> mainSlots,
+            ItemStack incoming) {
+        if (incoming == null || incoming.isEmpty()) return 0;
+        int capacity = 0;
+        int max = incoming.getMaxStackSize();
+        for (ItemStack existing : mainSlots) {
+            if (existing.isEmpty()) {
+                capacity += max;
+            } else if (ItemStack.isSameItemSameTags(existing, incoming)) {
+                capacity += Math.max(
+                        0,
+                        Math.min(existing.getMaxStackSize(), max)
+                                - existing.getCount());
+            }
+        }
+        return capacity;
+    }
+
+    /** Whether vanilla ground pickup can absorb at least one matching item. */
+    public static boolean canAcceptMain(
+            Inventory inv,
+            ItemStack incoming) {
+        return mainCapacityFor(inv, incoming) > 0;
     }
 }

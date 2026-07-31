@@ -24,7 +24,7 @@ public final class CollectItemsTaskRecord extends TaskRecord {
     /** Human-readable label for messages (e.g. "all items" or "diamond"). */
     public final String label;
 
-    /** Live progress, updated by the goal as items are absorbed. */
+    /** Live item-count progress, updated only after an inventory delta confirms pickup. */
     private int collected = 0;
 
     public CollectItemsTaskRecord(String toolCallId, long deadlineGameTime,
@@ -39,8 +39,8 @@ public final class CollectItemsTaskRecord extends TaskRecord {
         return collected;
     }
 
-    public void incrementCollected() {
-        this.collected++;
+    public void addCollected(int count) {
+        this.collected += Math.max(0, count);
     }
 
     @Override

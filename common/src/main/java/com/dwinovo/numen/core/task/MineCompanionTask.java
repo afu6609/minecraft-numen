@@ -109,6 +109,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private static final int DROP_SCAN_INTERVAL_TICKS = 10;
     private static final int DROP_SCAN_RADIUS = 48;
     private static final int MAX_TRACKED_DROPS = 64;
+    private static final double DROP_PICKUP_REACH_SQR = 1.5;
+    private static final int DROP_PICKUP_READY_CONFIRM_TICKS = 10;
+    private static final int DROP_PICKUP_TOTAL_CONFIRM_TICKS = 80;
     /**
      * A failed A* search used to be retried on the very next server tick. One
      * awkward deposit could therefore consume a full search budget 20 times a
@@ -135,6 +138,8 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     /** Items the target blocks drop (simulated via the server loot tables). The
      *  count is over THESE in the inventory, not blocks broken — redstone_ore yields ~4 redstone. */
     private Set<Item> dropItems = Set.of();
+    /** Per requested block type, the drop item alternatives used for capacity gates. */
+    private final Map<Block, Set<Item>> dropItemsByTarget = new HashMap<>();
     /** Matching items already in the inventory when the task began — the count is the DELTA above this
      *  (companion semantics: "gather N more", not an absolute "have N in the inventory"). */
     private int baseline;
@@ -143,6 +148,13 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     /** Cells of just-broken targets, each held as a walk-over goal until the mapped
      *  game time so the spawned drop gets picked up before moving on. */
     private final Map<BlockPos, Long> anticipatedDrops = new HashMap<>();
+    /** Matching blocks seen but skipped because their own drop currently cannot fit. */
+    private final Set<BlockPos> capacityBlocked = new HashSet<>();
+    /** A drop reached by navigation but not yet acknowledged by inventory progress. */
+    private ItemEntity confirmingDrop;
+    private int confirmingDropBaseline;
+    private int confirmingDropReadyTicks;
+    private int confirmingDropTotalTicks;
 
     private boolean navIsBranch;
     private BlockPos branchPoint;
@@ -232,6 +244,20 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         dropItems = computeDropItems();
         baseline = inventoryMatch();
         lastGathered = 0;
+        if (dropItems.isEmpty()) {
+            progressNote = "requested targets have no collectible item drop";
+            fail(
+                    "the requested " + r.label
+                            + " targets produced no collectible item with the "
+                            + "current block state and tool",
+                    FailureType.NO_MATERIAL);
+            return;
+        }
+        if (!canAcceptAnyTargetDrop()) {
+            progressNote = "main inventory is full";
+            fail(inventoryFullMessage(), FailureType.NO_MATERIAL);
+            return;
+        }
         // 首扫也走后台线程(加载区边界内的环形扫描可能要啃整个加载区,
         // 不挂 tick);结果落地前 onTick 的终局判定会等着。
         kickScan();
@@ -256,6 +282,13 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     workSuccessMessage(),
                     FailureType.UNKNOWN);
         }
+        if (!canAcceptAnyTargetDrop()) {
+            progressNote = "main inventory became full";
+            return requestOutcome(
+                    TaskState.FAILED,
+                    inventoryFullMessage(),
+                    FailureType.NO_MATERIAL);
+        }
         // LlmTaskChain extends the record deadline while survival preempts this
         // task. Derive the work edge from that live value so paused ticks do not
         // burn mining time while preserving the independent return reserve.
@@ -265,6 +298,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     TaskState.TIMEOUT,
                     workTimeoutMessage(),
                     FailureType.TIMED_OUT);
+        }
+        if (confirmingDrop != null) {
+            return tickDropConfirmation(gathered);
         }
 
         Level level = player.level();
@@ -332,6 +368,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 case RUNNING -> { return TaskState.RUNNING; }
                 case ARRIVED -> {
                     stopNav();
+                    ItemEntity arrivedDrop = nearbyMatchingDrop();
+                    if (arrivedDrop != null) {
+                        beginDropConfirmation(arrivedDrop, gathered);
+                        return TaskState.RUNNING;
+                    }
+                    // The cached position may already have been picked up or
+                    // merged away. Refresh before diagnosing a failed stance.
+                    drops = droppedItems();
                     // Arrived per the stance goal but nothing is reachable from here
                     // (line of sight blocked, ore beyond reach): this stance is a dud —
                     // blacklist the nearest ore and move on, exactly as a failed path
@@ -346,6 +390,20 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                         if (recordNavigationFailure("arrived at an unusable mining stance")) {
                             return tickReturn();
                         }
+                    } else if (reachableTarget() == null && !drops.isEmpty()) {
+                        ItemEntity strandedDrop = nearestTrackedDrop();
+                        if (strandedDrop != null) {
+                            blacklist.add(
+                                    strandedDrop.blockPosition().immutable());
+                            drops.removeIf(blacklist::contains);
+                            if (recordNavigationFailure(
+                                    "arrived at a dropped-item position but the "
+                                            + "live item was outside pickup reach")) {
+                                return tickReturn();
+                            }
+                        }
+                        // No live entity means this is only the short anticipated
+                        // spawn window; let it expire instead of inventing a failure.
                     }
                     return TaskState.RUNNING;   // a reachable shaft is handled next tick
                 }
@@ -374,6 +432,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         //    finish with whatever we gathered (the tool's contract: "fewer than count
         //    in range still succeeds"), rather than running off across the world.
         if (!EXPLORE_FOR_BLOCKS) {
+            if (!capacityBlocked.isEmpty()) {
+                return capacityBlockedFailure();
+            }
             if (r.getMined() > 0) {
                 progressNote = "gathered " + r.getMined() + "/" + r.count + ", no more " + r.label + " in range";
                 return requestOutcome(
@@ -390,6 +451,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             branchY = branchPoint.getY();
         }
         if (++branchTicks > MAX_BRANCH_TICKS) {
+            if (!capacityBlocked.isEmpty()) {
+                return capacityBlockedFailure();
+            }
             if (r.getMined() > 0) {
                 progressNote = "gathered " + r.getMined() + "/" + r.count + ", no more " + r.label + " in range";
                 return requestOutcome(
@@ -654,6 +718,8 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         List<BlockPos> out = new ArrayList<>();
         for (ItemEntity ie : level.getEntitiesOfClass(ItemEntity.class, box)) {
             if (!dropItems.contains(ie.getItem().getItem())) continue;
+            if (!PlayerInv.canAcceptMain(
+                    player.getInventory(), ie.getItem())) continue;
             BlockPos p = ie.blockPosition();
             if (blacklist.contains(p) || nearKnownOre(p)) continue;
             out.add(p);
@@ -665,6 +731,120 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             if (out.size() >= MAX_TRACKED_DROPS) break;
         }
         return out;
+    }
+
+    private ItemEntity nearbyMatchingDrop() {
+        AABB box = player.getBoundingBox().inflate(1.5);
+        return player.level()
+                .getEntitiesOfClass(
+                        ItemEntity.class,
+                        box,
+                        ie -> !ie.isRemoved()
+                                && dropItems.contains(ie.getItem().getItem())
+                                && !blacklist.contains(ie.blockPosition())
+                                && player.distanceToSqr(ie)
+                                        <= DROP_PICKUP_REACH_SQR)
+                .stream()
+                .min(Comparator.comparingDouble(player::distanceToSqr))
+                .orElse(null);
+    }
+
+    private ItemEntity nearestTrackedDrop() {
+        Level level = player.level();
+        int loadedReach = level instanceof ServerLevel sl
+                ? sl.getServer().getPlayerList().getViewDistance() * 16
+                : DROP_SCAN_RADIUS;
+        AABB box = new AABB(player.blockPosition())
+                .inflate(Math.min(loadedReach, DROP_SCAN_RADIUS));
+        return level.getEntitiesOfClass(
+                        ItemEntity.class,
+                        box,
+                        ie -> !ie.isRemoved()
+                                && dropItems.contains(ie.getItem().getItem())
+                                && PlayerInv.canAcceptMain(
+                                        player.getInventory(), ie.getItem())
+                                && !blacklist.contains(ie.blockPosition())
+                                && !nearKnownOre(ie.blockPosition()))
+                .stream()
+                .min(Comparator.comparingDouble(player::distanceToSqr))
+                .orElse(null);
+    }
+
+    private void beginDropConfirmation(
+            ItemEntity drop,
+            int gathered) {
+        confirmingDrop = drop;
+        confirmingDropBaseline = gathered;
+        confirmingDropReadyTicks = 0;
+        confirmingDropTotalTicks = 0;
+    }
+
+    private TaskState tickDropConfirmation(int gathered) {
+        ItemEntity drop = confirmingDrop;
+        if (gathered > confirmingDropBaseline) {
+            clearDropConfirmation();
+            drops = droppedItems();
+            return TaskState.RUNNING;
+        }
+        if (drop == null || drop.isRemoved()
+                || !dropItems.contains(drop.getItem().getItem())) {
+            clearDropConfirmation();
+            drops = droppedItems();
+            return TaskState.RUNNING;
+        }
+        if (!PlayerInv.canAcceptMain(
+                player.getInventory(), drop.getItem())) {
+            String item = net.minecraft.core.registries.BuiltInRegistries.ITEM
+                    .getKey(drop.getItem().getItem())
+                    .toString();
+            clearDropConfirmation();
+            return requestOutcome(
+                    TaskState.FAILED,
+                    exactDropInventoryMessage(item),
+                    FailureType.NO_MATERIAL);
+        }
+        if (player.distanceToSqr(drop) > DROP_PICKUP_REACH_SQR) {
+            clearDropConfirmation();
+            return TaskState.RUNNING;
+        }
+
+        confirmingDropTotalTicks++;
+        if (drop.hasPickUpDelay()) {
+            confirmingDropReadyTicks = 0;
+        } else {
+            confirmingDropReadyTicks++;
+        }
+        if (confirmingDropReadyTicks
+                        < DROP_PICKUP_READY_CONFIRM_TICKS
+                && confirmingDropTotalTicks
+                        < DROP_PICKUP_TOTAL_CONFIRM_TICKS) {
+            return TaskState.RUNNING;
+        }
+
+        String item = net.minecraft.core.registries.BuiltInRegistries.ITEM
+                .getKey(drop.getItem().getItem())
+                .toString();
+        int waited = confirmingDropTotalTicks;
+        BlockPos rejected = drop.blockPosition().immutable();
+        blacklist.add(rejected);
+        clearDropConfirmation();
+        drops = droppedItems();
+        return requestOutcome(
+                TaskState.FAILED,
+                "reached dropped " + item
+                        + " but vanilla reported no inventory pickup after "
+                        + waited + " tick(s); gathered "
+                        + r.getMined() + "/" + r.count
+                        + ". The drop may be owner-restricted or pickup was "
+                        + "cancelled by another mod.",
+                FailureType.UNKNOWN);
+    }
+
+    private void clearDropConfirmation() {
+        confirmingDrop = null;
+        confirmingDropBaseline = 0;
+        confirmingDropReadyTicks = 0;
+        confirmingDropTotalTicks = 0;
     }
 
     /** 距任一已知矿位 3 格内(distSqr ≤ 9)——挖那颗矿自然会带身体过去。 */
@@ -722,6 +902,14 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  is blacklisted and the loop moves on — matching how a failed path already blacklists
      *  the nearest ore, instead of grinding forever waiting for a shot. */
     private void mineProgress(BlockPos pos) {
+        BlockState targetState = player.level().getBlockState(pos);
+        if (!targetState.isAir() && !canAcceptDropFrom(targetState)) {
+            capacityBlocked.add(pos.immutable());
+            knownOres.remove(pos);
+            digger.cancel();
+            clearNoShot();
+            return;
+        }
         switch (digger.digStep(pos)) {
             case BROKE_TARGET -> {
                 knownOres.remove(pos);
@@ -767,13 +955,64 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         return sum;
     }
 
+    /** Whether at least one requested target alternative can currently be gathered. */
+    private boolean canAcceptAnyTargetDrop() {
+        if (dropItems.isEmpty()) return false;
+        Inventory inventory = player.getInventory();
+        for (Item item : dropItems) {
+            if (PlayerInv.canAcceptMain(
+                    inventory, new ItemStack(item))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Capacity gate for the concrete block selected this tick. */
+    private boolean canAcceptDropFrom(BlockState state) {
+        Set<Item> expected = dropItemsByTarget.get(state.getBlock());
+        if (expected == null || expected.isEmpty()) return false;
+        Inventory inventory = player.getInventory();
+        for (Item item : expected) {
+            if (PlayerInv.canAcceptMain(
+                    inventory, new ItemStack(item))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String inventoryFullMessage() {
+        return "main inventory cannot accept any requested drop from "
+                + r.label + "; gathered " + r.getMined() + "/" + r.count
+                + ". Do not discard anything automatically: pause and ask the "
+                + "owner whether to store items in a chest (interact_at, inspect_gui, "
+                + "transfer) or use drop_items, then retry mine.";
+    }
+
+    private String exactDropInventoryMessage(String item) {
+        return "main inventory cannot accept " + item + "; gathered "
+                + r.getMined() + "/" + r.count
+                + ". Do not discard anything automatically: pause and ask the "
+                + "owner whether to store items in a chest (interact_at, "
+                + "inspect_gui, transfer) or use drop_items, then retry mine.";
+    }
+
     /** The item set the target blocks drop — the server loot table rolled once per
      *  target with the best harvesting tool we carry (so an ore yields its
      *  ingot/gem, stone yields cobblestone, etc.). Falls back to the block's own item if it has no loot. */
     private Set<Item> computeDropItems() {
         Set<Item> items = new HashSet<>();
+        dropItemsByTarget.clear();
         if (!(player.level() instanceof ServerLevel level)) {
-            for (Block b : r.targets) items.add(b.asItem());
+            for (Block b : r.targets) {
+                ItemStack fallback = new ItemStack(b.asItem());
+                Set<Item> perTarget = fallback.isEmpty()
+                        ? Set.of()
+                        : Set.of(fallback.getItem());
+                dropItemsByTarget.put(b, perTarget);
+                items.addAll(perTarget);
+            }
             return items;
         }
         BlockPos origin = player.blockPosition();
@@ -785,11 +1024,19 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             } catch (RuntimeException broken) {
                 drops = List.of();
             }
+            Set<Item> perTarget = new HashSet<>();
             if (drops.isEmpty()) {
-                items.add(b.asItem());
+                ItemStack fallback = new ItemStack(b.asItem());
+                if (!fallback.isEmpty()) {
+                    perTarget.add(fallback.getItem());
+                }
             } else {
-                for (ItemStack d : drops) items.add(d.getItem());
+                for (ItemStack d : drops) {
+                    if (!d.isEmpty()) perTarget.add(d.getItem());
+                }
             }
+            dropItemsByTarget.put(b, Set.copyOf(perTarget));
+            items.addAll(perTarget);
         }
         return items;
     }
@@ -869,6 +1116,11 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         Level level = player.level();
         BlockPos feet = player.blockPosition();
         CalculationContext ctx = ContextFactory.forExecution(player);
+        capacityBlocked.removeIf(p -> {
+            BlockState state = level.getBlockState(p);
+            return state.isAir()
+                    || !r.targets.contains(state.getBlock());
+        });
         knownOres.removeIf(p -> {
             var state = level.getBlockState(p);
             if (state.isAir() || !r.targets.contains(state.getBlock()) || blacklist.contains(p)
@@ -883,6 +1135,11 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 unharvestable.add(p.immutable());
                 return true;
             }
+            if (!canAcceptDropFrom(state)) {
+                capacityBlocked.add(p.immutable());
+                return true;
+            }
+            capacityBlocked.remove(p);
             return false;
         });
         knownOres.sort(Comparator.comparingDouble(feet::distSqr));
@@ -951,6 +1208,9 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
      *  unreachable ({@code NO_PATH} — the terrain, not the scan radius, is the problem),
      *  with the counts. */
     private TaskState noOreFailure() {
+        if (!capacityBlocked.isEmpty()) {
+            return capacityBlockedFailure();
+        }
         if (!unharvestable.isEmpty()) {
             // Targets exist but the carried tools can't make them drop — the actionable
             // problem is the tool, not the deposit. Names the escape hatches explicitly.
@@ -978,6 +1238,19 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     "no reachable " + r.label + " found in the loaded area around me",
                     FailureType.MINED_OUT);
         }
+    }
+
+    private TaskState capacityBlockedFailure() {
+        return requestOutcome(
+                TaskState.FAILED,
+                "found " + capacityBlocked.size() + " " + r.label
+                        + " target(s), but their drops cannot enter the 36-slot "
+                        + "main inventory; gathered " + r.getMined() + "/"
+                        + r.count + ". Do not discard anything automatically: "
+                        + "pause and ask the owner whether to store items in a "
+                        + "chest (interact_at, inspect_gui, transfer) or use "
+                        + "drop_items, then retry mine.",
+                FailureType.NO_MATERIAL);
     }
 
     private boolean withinReach(BlockPos pos) {
