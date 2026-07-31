@@ -8,6 +8,7 @@ import com.dwinovo.numen.core.pathing.bridge.ContextFactory;
 import com.dwinovo.numen.core.pathing.goal.GoalCompiler;
 import com.dwinovo.numen.core.pathing.moves.ActionCosts;
 import com.dwinovo.numen.core.pathing.moves.CalculationContext;
+import com.dwinovo.numen.core.pathing.moves.Movement;
 import com.dwinovo.numen.core.pathing.moves.MovementHelper;
 import com.dwinovo.numen.core.act.BlockDigger;
 import com.dwinovo.numen.core.pathing.exec.PlayerNav;
@@ -121,6 +122,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private static final int MAX_TOTAL_NAV_FAILURES = 18;
     /** A refreshed scan may expose new cells forever; cap rejected cells per job. */
     private static final int MAX_BLACKLISTED_TARGETS = 24;
+    /** Let a path-arrived body settle onto real support before declaring its return unusable. */
+    private static final int MAX_RETURN_SETTLE_TICKS = 40;
+    /** Reserve at least this much after the work deadline before scheduler timeout. */
+    private static final long MIN_RETURN_RESERVE_TICKS = 30L * 20L;
 
     private final List<BlockPos> knownOres = new ArrayList<>();
     private final Set<BlockPos> blacklist = new HashSet<>();
@@ -158,6 +163,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private int totalNavFailures;
     private int lastGathered;
     private long navRetryAfterTick;
+    /** Dimension and feet cell captured before any terrain-modifying navigation begins. */
+    private String entryDimension;
+    private MineReturnGuard returnGuard;
+    private int returnSettleTicks;
+    /** Active task ticks left in the independent return watchdog. */
+    private long returnTicksRemaining;
 
     // Progressive dig (blocks break tick-by-tick at legitimate player speed, not
     // instabreak) — shared with the path executor so all breaking reads the same.
@@ -174,22 +185,48 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         // would destroy the block for no drop. Same gate as break_block / the cost model
         // (BlockHelper.canHarvest, whole-inventory). prune() then drops any individual unharvestable
         // cell, so a mixed request (e.g. coal we can mine + diamond we can't) still works.
-        return List.of(() -> {
-            boolean anyHarvestable = r.targets.stream().anyMatch(
-                    b -> BlockHelper.canHarvest(player.getInventory(), b.defaultBlockState()));
-            if (!anyHarvestable) {
-                return new Precondition.Failure(
-                        "can't harvest " + r.label + " with the current tools — mining it would"
-                        + " destroy it without any drop. Equip a suitable tool (e.g. a pickaxe)"
-                        + " first; to just destroy a block regardless of drops, use break_block.",
-                        FailureType.WRONG_TOOL);
-            }
-            return null;
-        });
+        return List.of(
+                () -> {
+                    BlockPos anchor = feet();
+                    boolean stableAnchor = player.onGround()
+                            && Movement.pathStart(player).equals(anchor)
+                            && MovementHelper.canWalkOn(player.level(), anchor.below())
+                            && MovementHelper.canWalkThrough(player.level(), anchor)
+                            && MovementHelper.canWalkThrough(player.level(), anchor.above());
+                    if (!stableAnchor) {
+                        return new Precondition.Failure(
+                                "can't start mining until the body is standing on a stable,"
+                                        + " walkable entry cell; move to solid ground and retry",
+                                FailureType.HAZARD);
+                    }
+                    return null;
+                },
+                () -> {
+                    boolean anyHarvestable = r.targets.stream().anyMatch(
+                            b -> BlockHelper.canHarvest(
+                                    player.getInventory(), b.defaultBlockState()));
+                    if (!anyHarvestable) {
+                        return new Precondition.Failure(
+                                "can't harvest " + r.label
+                                        + " with the current tools — mining it would"
+                                        + " destroy it without any drop. Equip a suitable tool"
+                                        + " (e.g. a pickaxe) first; to just destroy a block"
+                                        + " regardless of drops, use break_block.",
+                                FailureType.WRONG_TOOL);
+                    }
+                    return null;
+                });
     }
 
     @Override
     protected void onStart() {
+        long workDeadline = r.getDeadlineGameTime();
+        entryDimension = player.level().dimension().location().toString();
+        returnGuard = new MineReturnGuard(feet());
+        // LlmTaskChain checks the record deadline before invoking onTick. Keep a
+        // small independent window beyond the original work deadline so this
+        // task, not the scheduler, gets to enter its authoritative return phase.
+        r.extendDeadlineTo(workDeadline + MIN_RETURN_RESERVE_TICKS);
         // Count toward `count` by ITEMS gathered, not blocks broken: resolve what these
         // blocks drop, and snapshot how many we already hold so the tally is the delta above it.
         dropItems = computeDropItems();
@@ -202,6 +239,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
 
     @Override
     protected TaskState onTick() {
+        if (returnGuard != null && returnGuard.phase() != MineReturnGuard.Phase.WORKING) {
+            return tickReturn();
+        }
+
         int gathered = Math.max(0, inventoryMatch() - baseline);   // matching items gained so far
         r.setMined(gathered);
         if (gathered > lastGathered) {
@@ -210,7 +251,20 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         }
         if (gathered >= r.count) {
             progressNote = "gathered all requested";
-            return TaskState.SUCCESS;
+            return requestOutcome(
+                    TaskState.SUCCESS,
+                    workSuccessMessage(),
+                    FailureType.UNKNOWN);
+        }
+        // LlmTaskChain extends the record deadline while survival preempts this
+        // task. Derive the work edge from that live value so paused ticks do not
+        // burn mining time while preserving the independent return reserve.
+        if (player.level().getGameTime()
+                >= r.getDeadlineGameTime() - MIN_RETURN_RESERVE_TICKS) {
+            return requestOutcome(
+                    TaskState.TIMEOUT,
+                    workTimeoutMessage(),
+                    FailureType.TIMED_OUT);
         }
 
         Level level = player.level();
@@ -290,7 +344,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                                 player.blockPosition().toShortString());
                         blacklistNearest();
                         if (recordNavigationFailure("arrived at an unusable mining stance")) {
-                            return TaskState.FAILED;
+                            return tickReturn();
                         }
                     }
                     return TaskState.RUNNING;   // a reachable shaft is handled next tick
@@ -303,7 +357,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                     blacklistNearest();
                     stopNav();
                     if (recordNavigationFailure(reason)) {
-                        return TaskState.FAILED;
+                        return tickReturn();
                     }
                     return TaskState.RUNNING;
                 }
@@ -322,7 +376,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         if (!EXPLORE_FOR_BLOCKS) {
             if (r.getMined() > 0) {
                 progressNote = "gathered " + r.getMined() + "/" + r.count + ", no more " + r.label + " in range";
-                return TaskState.SUCCESS;
+                return requestOutcome(
+                        TaskState.SUCCESS,
+                        workSuccessMessage(),
+                        FailureType.UNKNOWN);
             }
             return noOreFailure();
         }
@@ -335,7 +392,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         if (++branchTicks > MAX_BRANCH_TICKS) {
             if (r.getMined() > 0) {
                 progressNote = "gathered " + r.getMined() + "/" + r.count + ", no more " + r.label + " in range";
-                return TaskState.SUCCESS;
+                return requestOutcome(
+                        TaskState.SUCCESS,
+                        workSuccessMessage(),
+                        FailureType.UNKNOWN);
             }
             return noOreFailure();
         }
@@ -351,6 +411,151 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             case FAILED -> { stopNav(); return TaskState.RUNNING; } // boxed in — rescan/retry
         }
         return TaskState.RUNNING;
+    }
+
+    // ---- authoritative return-to-entry phase ----
+
+    private TaskState requestOutcome(
+            TaskState state,
+            String message,
+            FailureType failureType) {
+        requestReturn(state, message, failureType);
+        return tickReturn();
+    }
+
+    private void requestReturn(
+            TaskState state,
+            String message,
+            FailureType failureType) {
+        if (returnGuard == null || returnGuard.phase() != MineReturnGuard.Phase.WORKING) {
+            return;
+        }
+        boolean alreadyAtEntry = atEntryAnchor();
+        returnGuard.request(state, message, failureType, alreadyAtEntry);
+        if (!returnGuard.returning()) {
+            return;
+        }
+
+        // Freeze the completed mining outcome before any return work. No target
+        // selection, digging, or background scan may resume during this phase.
+        stopNav();
+        digger.cancel();
+        if (scan != null) {
+            scan.cancel(true);
+            scan = null;
+        }
+        returnSettleTicks = 0;
+        long now = player.level().getGameTime();
+        returnTicksRemaining =
+                MineReturnGuard.returnBudgetTicks(feet(), returnGuard.entry());
+        // TaskRecord deadlines can only move later, so they cannot bound an
+        // early-finishing long mine job. The local active-tick watchdog below is
+        // authoritative; this outer deadline is one tick later as a scheduler fuse.
+        r.extendDeadlineTo(now + returnTicksRemaining + 1L);
+    }
+
+    private TaskState tickReturn() {
+        if (returnGuard == null) {
+            fail("TRAPPED: mining return guard was not initialized",
+                    FailureType.TRAPPED);
+            return TaskState.FAILED;
+        }
+        MineReturnGuard.Completion ready = returnGuard.completion();
+        if (ready != null) {
+            return finishReturn(ready);
+        }
+        if (!returnGuard.returning()) {
+            fail("TRAPPED: mining ended without a resolved return state",
+                    FailureType.TRAPPED);
+            return TaskState.FAILED;
+        }
+
+        String currentDimension =
+                player.level().dimension().location().toString();
+        if (!entryDimension.equals(currentDimension)) {
+            returnGuard.markTrapped(
+                    feet(),
+                    "dimension changed from " + entryDimension + " to "
+                            + currentDimension + " during mining");
+            return finishReturn(returnGuard.completion());
+        }
+        if (atEntryAnchor()) {
+            stopNav();
+            returnGuard.markReturned();
+            return finishReturn(returnGuard.completion());
+        }
+        if (returnTicksRemaining <= 0L) {
+            returnGuard.markTrapped(
+                    feet(),
+                    "bounded return budget expired before entry was reached");
+            stopNav();
+            return finishReturn(returnGuard.completion());
+        }
+        returnTicksRemaining--;
+
+        if (nav == null) {
+            nav = PlayerNav.to(
+                    player,
+                    () -> GoalCompiler.standOn(returnGuard.entry()),
+                    MINE_SPEED,
+                    this::atEntryAnchor);
+            nav.setHighlights(() -> List.of(returnGuard.entry()));
+        }
+        PlayerNav.Status status = nav.tick();
+        if (status == PlayerNav.Status.RUNNING) {
+            returnSettleTicks = 0;
+            return TaskState.RUNNING;
+        }
+        if (status == PlayerNav.Status.ARRIVED) {
+            // Search membership can become true one jump before the body has
+            // stable support. Give vanilla physics a bounded settle window,
+            // then report the unusable arrival explicitly.
+            if (atEntryAnchor()) {
+                stopNav();
+                returnGuard.markReturned();
+                return finishReturn(returnGuard.completion());
+            }
+            if (++returnSettleTicks <= MAX_RETURN_SETTLE_TICKS) {
+                return TaskState.RUNNING;
+            }
+            returnGuard.markTrapped(
+                    feet(),
+                    "return path reached an ungrounded or unusable entry stance");
+        } else {
+            String reason = nav.failReason();
+            returnGuard.markTrapped(feet(), reason);
+        }
+        stopNav();
+        return finishReturn(returnGuard.completion());
+    }
+
+    private TaskState finishReturn(MineReturnGuard.Completion completion) {
+        if (completion == null) {
+            fail("TRAPPED: mining return produced no terminal receipt",
+                    FailureType.TRAPPED);
+            return TaskState.FAILED;
+        }
+        if (completion.state() == TaskState.FAILED) {
+            fail(completion.message(), completion.failureType());
+        }
+        return completion.state();
+    }
+
+    private BlockPos feet() {
+        return BlockHelper.playerFeet(
+                player.level(), player.getX(), player.getY(), player.getZ());
+    }
+
+    private boolean atEntryAnchor() {
+        if (returnGuard == null
+                || entryDimension == null
+                || !entryDimension.equals(
+                        player.level().dimension().location().toString())
+                || !player.onGround()) {
+            return false;
+        }
+        return returnGuard.entry().equals(feet())
+                && returnGuard.entry().equals(Movement.pathStart(player));
     }
 
     // ---- goals ----
@@ -722,11 +927,15 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         }
         stopNav();
         progressNote = "navigation circuit breaker opened";
-        fail("navigation stopped after " + totalNavFailures
-                        + " failed route(s), " + blacklist.size()
-                        + " rejected target(s), and " + r.getMined() + "/" + r.count
-                        + " gathered; last failure: "
-                        + (detail == null || detail.isBlank() ? "target unreachable" : detail),
+        requestReturn(
+                TaskState.FAILED,
+                "navigation stopped after " + totalNavFailures
+                                + " failed route(s), " + blacklist.size()
+                                + " rejected target(s), and " + r.getMined() + "/" + r.count
+                                + " gathered; last failure: "
+                                + (detail == null || detail.isBlank()
+                                        ? "target unreachable"
+                                        : detail),
                 FailureType.NO_PATH);
         com.dwinovo.numen.Constants.LOG.warn(
                 "[numen-task] mine navigation circuit opened: failures={}, consecutive={},"
@@ -745,23 +954,30 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         if (!unharvestable.isEmpty()) {
             // Targets exist but the carried tools can't make them drop — the actionable
             // problem is the tool, not the deposit. Names the escape hatches explicitly.
-            fail("found " + unharvestable.size() + " " + r.label + " but none can be harvested with"
-                    + " the current tools (mining would destroy them without any drop); gathered "
-                    + r.getMined() + ". Equip a better tool (equip_item) and retry; to just destroy"
-                    + " blocks regardless of drops, use break_block.",
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "found " + unharvestable.size() + " " + r.label
+                            + " but none can be harvested with"
+                            + " the current tools (mining would destroy them without any drop); gathered "
+                            + r.getMined()
+                            + ". Equip a better tool (equip_item) and retry; to just destroy"
+                            + " blocks regardless of drops, use break_block.",
                     FailureType.WRONG_TOOL);
-            return TaskState.FAILED;
         }
         if (!blacklist.isEmpty()) {
-            fail("found " + blacklist.size() + " " + r.label + " nearby but reached none of them"
-                    + " — all " + blacklist.size()
-                    + " were blacklisted as unreachable (no path / no clear shot); gathered 0",
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "found " + blacklist.size() + " " + r.label
+                            + " nearby but reached none of them"
+                            + " — all " + blacklist.size()
+                            + " were blacklisted as unreachable (no path / no clear shot); gathered 0",
                     FailureType.NO_PATH);
         } else {
-            fail("no reachable " + r.label + " found in the loaded area around me",
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "no reachable " + r.label + " found in the loaded area around me",
                     FailureType.MINED_OUT);
         }
-        return TaskState.FAILED;
     }
 
     private boolean withinReach(BlockPos pos) {
@@ -794,21 +1010,64 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         data.put("target", r.label);
         data.put("requested", r.count);
         data.put("gathered", r.getMined());
+        data.put("final_x", player.getX());
+        data.put("final_y", player.getY());
+        data.put("final_z", player.getZ());
+        if (returnGuard != null) {
+            data.put("entry_x", returnGuard.entry().getX());
+            data.put("entry_y", returnGuard.entry().getY());
+            data.put("entry_z", returnGuard.entry().getZ());
+            data.put("entry_dimension", entryDimension);
+            data.put("return_state", returnGuard.resultState());
+            data.put("safe_return_verified",
+                    returnGuard.phase() == MineReturnGuard.Phase.RETURNED);
+            data.put("return_ticks_remaining", Math.max(0L, returnTicksRemaining));
+        }
         return data;
     }
 
     @Override
     protected String successMessage() {
+        MineReturnGuard.Completion completion =
+                returnGuard == null ? null : returnGuard.completion();
+        if (completion != null && completion.state() == TaskState.SUCCESS) {
+            return completion.message();
+        }
+        return workSuccessMessage();
+    }
+
+    private String workSuccessMessage() {
         return "gathered " + r.getMined() + "/" + r.count + " " + r.label + " (" + progressNote + ")";
     }
 
     @Override
     protected String timeoutMessage() {
-        return "timed out after gathering " + r.getMined() + "/" + r.count + " " + r.label;
+        if (returnGuard != null && returnGuard.returning()) {
+            returnGuard.markTrapped(
+                    feet(),
+                    "reserved return deadline expired before entry was reached");
+            return returnGuard.completion().message();
+        }
+        MineReturnGuard.Completion completion =
+                returnGuard == null ? null : returnGuard.completion();
+        if (completion != null && completion.state() == TaskState.TIMEOUT) {
+            return completion.message();
+        }
+        return workTimeoutMessage();
+    }
+
+    private String workTimeoutMessage() {
+        return "timed out after gathering " + r.getMined() + "/" + r.count
+                + " " + r.label;
     }
 
     @Override
     protected String cancelledMessage() {
-        return "interrupted after gathering " + r.getMined() + "/" + r.count + " " + r.label;
+        String returnState = returnGuard == null
+                ? "not started"
+                : returnGuard.resultState();
+        return "interrupted after gathering " + r.getMined() + "/" + r.count
+                + " " + r.label + "; return state=" + returnState
+                + " (owner stop is immediate, so no safe return is claimed)";
     }
 }

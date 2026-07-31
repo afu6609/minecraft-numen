@@ -23,8 +23,9 @@ import com.dwinovo.numen.task.TaskState;
  *       {@link #OUT_OF_REACH}, {@link #HAZARD}.</li>
  *   <li><b>Kick-back-to-LLM</b> (the goal can't be met without a strategic
  *       decision the deterministic layer must not make): {@link #NO_MATERIAL},
- *       {@link #WRONG_TOOL}, {@link #TARGET_LOST}, {@link #MINED_OUT} — the model
- *       decides whether to acquire the missing thing, widen the search, or stop.</li>
+ *       {@link #WRONG_TOOL}, {@link #TARGET_LOST}, {@link #MINED_OUT},
+ *       {@link #TRAPPED} — the model decides whether to acquire the missing
+ *       thing, widen the search, rescue the body, or stop.</li>
  * </ul>
  * A rung declares which {@code FailureType}s it {@code handles}; anything it does
  * not handle falls straight through to a terminal give-up carrying this cause.
@@ -59,6 +60,12 @@ public enum FailureType {
     MINED_OUT,
     /** A fluid/lava/void hazard blocks the safe execution. In-ladder: route around, else give up. */
     HAZARD,
+    /**
+     * A terrain-modifying task could not verify a land route back to its
+     * pre-task entry anchor. Terminal and explicit: the model must not assume
+     * the body is safe or continue the same excavation blindly.
+     */
+    TRAPPED,
     /** Pre-empted or cancelled (owner stop, death). Not a real failure — terminal housekeeping. */
     INTERRUPTED,
     /** Ran out of deadline budget. */
