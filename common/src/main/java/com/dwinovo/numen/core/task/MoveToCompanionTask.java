@@ -6,6 +6,10 @@ import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.core.pathing.calc.NavGoal;
 import com.dwinovo.numen.core.pathing.exec.PlayerNav;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
+import com.dwinovo.numen.task.control.BodyControlClass;
+import com.dwinovo.numen.task.control.BodyControlPolicies;
+import com.dwinovo.numen.task.navigation.BodyNavigationPort;
+import com.dwinovo.numen.task.navigation.BodyNavigationPorts;
 import net.minecraft.core.BlockPos;
 
 import java.util.HashMap;
@@ -55,6 +59,7 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
      *  thrash). This is the only tolerance — arrival itself is exact. */
     private static final double WALK_SPEED = 1.0;
     private static final double NEAR_SUCCESS_RADIUS = 3.0;
+    private static final String LLM_CONTROL_ACTOR = "numen-chain:llm";
     /** Once the planner can't get closer (e.g. it stopped at the water surface above an
      *  underwater goal), keep the task alive this many ticks of NO progress before giving
      *  up — long enough for the body to passively drift onto a reachable underwater target,
@@ -65,6 +70,21 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
     private final int by;
     private final int bz;
     private final BlockPos blockTarget;   // only meaningful for BLOCK kind
+
+    /**
+     * Only BLOCK is eligible for delegation. Once accepted, its backend is
+     * sticky for the whole task; COLUMN/YLEVEL/FIND are initialized LEGACY and
+     * never enter the port.
+     */
+    private enum NavigationBackend {
+        UNDECIDED,
+        PORT,
+        LEGACY
+    }
+
+    private NavigationBackend backend;
+    private BodyNavigationPort.Operation portOperation;
+    private BodyNavigationPort.Snapshot lastPortSnapshot;
 
     private double bestDist = Double.MAX_VALUE;   // closest we've gotten to the goal
     private int settleTicks = 0;                  // ticks of no progress after the planner gave up
@@ -97,6 +117,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         this.by = record.y != null ? (int) Math.floor(record.y) : 0;
         this.bz = record.z != null ? (int) Math.floor(record.z) : 0;
         this.blockTarget = new BlockPos(bx, by, bz);
+        this.backend = record.kind == MoveToTaskRecord.Kind.BLOCK
+                ? NavigationBackend.UNDECIDED
+                : NavigationBackend.LEGACY;
     }
 
     @Override
@@ -129,12 +152,26 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         long extra = Math.min(MAX_EXTRA_TICKS, 600 + (long) (repDistance() * TICKS_PER_BLOCK));
         r.extendDeadlineTo(player.level().getGameTime() + extra);
         leaseCapGameTime = player.level().getGameTime() + CHECK_IN_CAP_TICKS;
+        if (r.kind == MoveToTaskRecord.Kind.BLOCK
+                && !selectBlockBackend()) {
+            return;
+        }
         // BLOCK targets go through the compiled front door so the target cell is
         // SACRED when solid — the route may neither dig through nor bury the very
         // block it was asked to reach. COLUMN/YLEVEL have no block objective.
-        nav = r.kind == MoveToTaskRecord.Kind.BLOCK
-                ? PlayerNav.to(player, this::blockCompiled, WALK_SPEED, this::reached)
-                : PlayerNav.toGoal(player, this::goal, WALK_SPEED, this::reached);
+        if (r.kind != MoveToTaskRecord.Kind.BLOCK) {
+            nav = PlayerNav.toGoal(
+                    player,
+                    this::goal,
+                    WALK_SPEED,
+                    this::reached);
+        } else if (backend == NavigationBackend.LEGACY) {
+            nav = PlayerNav.to(
+                    player,
+                    this::blockCompiled,
+                    WALK_SPEED,
+                    this::reached);
+        }
         com.dwinovo.numen.Constants.LOG.info(
                 "[numen-task] goto start kind={} target={},{},{} solid={}",
                 r.kind, bx, by, bz,
@@ -142,9 +179,37 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // Highlight the ACTUAL requested cell (not the path's best-effort end) so the overlay
         // box sits on the real target — e.g. a BLOCK goal under/over water that the path can
         // only approach to the surface. The goal itself is always rendered, not the plan's end.
-        if (r.kind == MoveToTaskRecord.Kind.BLOCK) {
+        if (r.kind == MoveToTaskRecord.Kind.BLOCK
+                && backend == NavigationBackend.LEGACY) {
             nav.setHighlights(() -> java.util.List.of(blockTarget));
         }
+    }
+
+    /**
+     * Select BLOCK's backend exactly once. A provider rejection is terminal;
+     * UNSUPPORTED is the sole state that may create PlayerNav afterwards.
+     */
+    private boolean selectBlockBackend() {
+        BodyNavigationPort.StartResult started = startPortMove();
+        return switch (started.disposition()) {
+            case ACCEPTED -> {
+                backend = NavigationBackend.PORT;
+                portOperation = started.operation();
+                yield true;
+            }
+            case UNSUPPORTED -> {
+                backend = NavigationBackend.LEGACY;
+                yield true;
+            }
+            case REJECTED -> {
+                backend = NavigationBackend.PORT;
+                fail(
+                        "could not start delegated goto: "
+                                + startMessage(started),
+                        FailureType.UNKNOWN);
+                yield false;
+            }
+        };
     }
 
     /** The navigation goal for this move's kind. */
@@ -224,6 +289,10 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // reached() is checked BEFORE the nav==null guard so an already-at-target start
         // (which never builds a nav) lands on SUCCESS rather than the defensive FAILED.
         if (reached()) return TaskState.SUCCESS;
+        if (r.kind == MoveToTaskRecord.Kind.BLOCK
+                && backend == NavigationBackend.PORT) {
+            return tickPortBlock();
+        }
         if (r.kind == MoveToTaskRecord.Kind.FIND && nav == null) {
             TaskState pre = tickFindDiscovery();
             if (pre != null) {
@@ -305,6 +374,111 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
                 yield TaskState.FAILED;
             }
         };
+    }
+
+    /**
+     * Drive the capability-gated BLOCK provider. This branch never creates or
+     * ticks PlayerNav and never enters the legacy near-retry ladder.
+     */
+    private TaskState tickPortBlock() {
+        if (portOperation == null) {
+            fail(
+                    blockedMessage(
+                            "delegated navigation operation disappeared"),
+                    FailureType.UNKNOWN);
+            return TaskState.FAILED;
+        }
+
+        BodyNavigationPort.Snapshot snapshot;
+        try {
+            snapshot = portOperation.snapshot();
+        } catch (RuntimeException failure) {
+            trackPortProgress();
+            return finishPortFailure(
+                    "navigation provider status failed: "
+                            + safeMessage(failure),
+                    FailureType.UNKNOWN);
+        }
+        lastPortSnapshot = snapshot;
+        trackPortProgress();
+
+        return switch (snapshot.state()) {
+            case PLANNING, MOVING -> {
+                renewPortProgressLease(snapshot.stalledTicks());
+                yield TaskState.RUNNING;
+            }
+            case HOLDING -> {
+                cancelPortOperation(
+                        "exact-cell move returned follow-only HOLDING state");
+                fail(
+                        "delegated goto failed: the navigation provider "
+                                + "returned the follow-only HOLDING state for "
+                                + "an exact-cell move",
+                        FailureType.UNKNOWN);
+                yield TaskState.FAILED;
+            }
+            case ARRIVED -> {
+                // Provider arrival is advisory. The existing feet + supported
+                // path-start predicate remains the sole exact BLOCK verdict.
+                if (reached()) yield TaskState.SUCCESS;
+                cancelPortOperation("provider arrival failed exact verification");
+                fail(
+                        blockedMessage(
+                                "the provider reported arrival, but the exact "
+                                        + "supported target stance was not reached"),
+                        FailureType.STANCE_DUD);
+                yield TaskState.FAILED;
+            }
+            case FAILED -> finishPortFailure(
+                    snapshotMessage(snapshot, "delegated navigation failed"),
+                    mapFailure(snapshot.failure()));
+            case CANCELLED -> {
+                cancelPortOperation("provider cancelled delegated goto");
+                yield TaskState.CANCELLED;
+            }
+        };
+    }
+
+    private void renewPortProgressLease(int stalledTicks) {
+        if (stalledTicks > PROGRESS_GRACE_TICKS
+                || leaseCapGameTime <= 0) {
+            return;
+        }
+        long now = player.level().getGameTime();
+        r.extendDeadlineTo(
+                Math.min(
+                        now + PROGRESS_LEASE_TICKS,
+                        leaseCapGameTime));
+    }
+
+    /** Mirror the legacy settle clock without touching its PlayerNav. */
+    private void trackPortProgress() {
+        double distance = repDistance();
+        if (distance < bestDist - 0.1) {
+            bestDist = distance;
+            settleTicks = 0;
+        } else {
+            settleTicks++;
+        }
+    }
+
+    /**
+     * Keep the existing water-settle and close-enough teaching success, then
+     * finish with the provider's structured cause. No legacy or near retry is
+     * allowed after the port was accepted.
+     */
+    private TaskState finishPortFailure(
+            String reason,
+            FailureType failureType) {
+        if (player.isInWater() && settleTicks < MAX_SETTLE_TICKS) {
+            return TaskState.RUNNING;
+        }
+        if (closeEnoughToSucceed()) {
+            return TaskState.SUCCESS;
+        }
+        cancelPortOperation("delegated goto finished unsuccessfully");
+        fail(blockedMessage(reason), failureType);
+        return TaskState.FAILED;
     }
 
     /** The retry rung's loosened goal — the destination widened to the SAME radius that
@@ -466,6 +640,95 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         return best;
     }
 
+    /**
+     * Start the exact-cell provider under the LLM task's already acquired
+     * control session. The port is a motor beneath this lease, not a second
+     * body-control actor.
+     */
+    private BodyNavigationPort.StartResult startPortMove() {
+        var control = BodyControlPolicies.requestFor(
+                player,
+                LLM_CONTROL_ACTOR,
+                r.publicId(),
+                BodyControlClass.DIRECTED_ACTION,
+                BodyControlClass.DIRECTED_ACTION.defaultPriority());
+        if (!BodyControlPolicies.owns(control)) {
+            return BodyNavigationPort.StartResult.rejected(
+                    "the exact Numen task session does not own body control");
+        }
+
+        try {
+            return BodyNavigationPorts.startMoveBlock(
+                    new BodyNavigationPort.MoveBlockRequest(
+                            new BodyNavigationPort.ControlBinding(control),
+                            new BodyNavigationPort.BlockPosition(
+                                    bx,
+                                    by,
+                                    bz)));
+        } catch (RuntimeException failure) {
+            return BodyNavigationPort.StartResult.rejected(
+                    "navigation provider start failed: "
+                            + safeMessage(failure));
+        }
+    }
+
+    private static String startMessage(
+            BodyNavigationPort.StartResult result) {
+        if (result == null) return "provider returned no result";
+        return result.message() == null || result.message().isBlank()
+                ? result.disposition().name().toLowerCase()
+                : result.message();
+    }
+
+    private static String snapshotMessage(
+            BodyNavigationPort.Snapshot snapshot,
+            String fallback) {
+        return snapshot.message() == null || snapshot.message().isBlank()
+                ? fallback
+                : snapshot.message();
+    }
+
+    private static FailureType mapFailure(
+            BodyNavigationPort.FailureKind failure) {
+        return switch (failure) {
+            case NO_PATH -> FailureType.NO_PATH;
+            case BOXED_IN -> FailureType.BOXED_IN;
+            case TARGET_LOST -> FailureType.TARGET_LOST;
+            case OUT_OF_RANGE -> FailureType.OUT_OF_REACH;
+            case CONTROL_LOST -> FailureType.INTERRUPTED;
+            case NO_MATERIAL -> FailureType.NO_MATERIAL;
+            case HAZARD -> FailureType.HAZARD;
+            case CAPABILITY_MISMATCH -> FailureType.UNSUPPORTED;
+            case NONE, INTERNAL -> FailureType.UNKNOWN;
+        };
+    }
+
+    private static String safeMessage(RuntimeException failure) {
+        String message = failure.getMessage();
+        return message == null || message.isBlank()
+                ? failure.getClass().getSimpleName()
+                : message;
+    }
+
+    /**
+     * Retain a handle whose idempotent cancellation threw so terminal cleanup
+     * gets one more chance to stop it before the enclosing lease is released.
+     */
+    private boolean cancelPortOperation(String reason) {
+        BodyNavigationPort.Operation operation = portOperation;
+        if (operation == null) return true;
+        try {
+            operation.cancel(reason);
+            portOperation = null;
+            return true;
+        } catch (RuntimeException failure) {
+            com.dwinovo.numen.Constants.LOG.warn(
+                    "[numen-task] delegated goto cancel failed: {}",
+                    safeMessage(failure));
+            return false;
+        }
+    }
+
     @Override
     protected Map<String, Object> resultData() {
         int gy = player.blockPosition().getY();
@@ -515,7 +778,12 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
         // Two different stories for the model: a stall (progress dried up — something is
         // wrong, reconsider) vs a check-in (journey healthy but longer than the cap —
         // resuming is the right move).
-        boolean stalled = nav == null || nav.stallTicks() > PROGRESS_GRACE_TICKS;
+        boolean stalled = backend == NavigationBackend.PORT
+                ? lastPortSnapshot == null
+                        || lastPortSnapshot.stalledTicks()
+                                > PROGRESS_GRACE_TICKS
+                : nav == null
+                        || nav.stallTicks() > PROGRESS_GRACE_TICKS;
         return "timed out " + String.format("%.1f", remaining) + " blocks from target (now at "
                 + bx(gy) + "); "
                 + (stalled
@@ -532,6 +800,9 @@ public final class MoveToCompanionTask extends AbstractCompanionTask<MoveToTaskR
 
     @Override
     protected void cleanup() {
+        if (backend == NavigationBackend.PORT) {
+            cancelPortOperation("goto task finalized");
+        }
         super.cleanup();
         if (findScan != null) {
             findScan.cancel(true);

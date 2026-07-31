@@ -2,17 +2,25 @@ package com.dwinovo.numen.core.tools;
 
 import com.dwinovo.numen.agent.tool.Schema;
 import com.dwinovo.numen.agent.tool.NumenTool;
+import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.entity.NumenPlayer;
+import com.dwinovo.numen.task.TaskResult;
+import com.dwinovo.numen.task.control.BodyControlClass;
+import com.dwinovo.numen.task.control.BodyControlPolicies;
+import com.dwinovo.numen.task.control.BodyControlPolicy;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** World-action tool (raw NumenTool): craft an item start-to-finish in one call. */
 public final class CraftTool implements NumenTool {
 
     private static final Gson GSON = new Gson();
+    private static final AtomicLong SESSION_SOURCE = new AtomicLong();
+    private static final String CONTROL_ACTOR = "numen-direct:craft";
     private final CraftTools impl = new CraftTools();
 
     private record Args(String item_id, Integer count) {}
@@ -46,6 +54,35 @@ public final class CraftTool implements NumenTool {
     @Override
     public void onServerCall(String toolCallId, JsonObject args, NumenPlayer self, Consumer<String> reply) {
         Args a = GSON.fromJson(args, Args.class);
-        reply.accept(impl.craft(a.item_id(), a.count(), self));
+        String sessionId = "craft-"
+                + Long.toUnsignedString(SESSION_SOURCE.incrementAndGet(), 36)
+                + (toolCallId == null || toolCallId.isBlank()
+                        ? ""
+                        : ":" + toolCallId);
+        BodyControlPolicy.Decision control = BodyControlPolicies.acquire(
+                self,
+                CONTROL_ACTOR,
+                sessionId,
+                BodyControlClass.DIRECTED_ACTION,
+                BodyControlClass.DIRECTED_ACTION.defaultPriority());
+        if (!control.granted()) {
+            reply.accept(TaskResult.fail(control.reason()).toJson());
+            return;
+        }
+        try {
+            InputDriver.neutralize(self);
+            reply.accept(impl.craft(a.item_id(), a.count(), self));
+        } finally {
+            try {
+                InputDriver.neutralize(self);
+            } finally {
+                BodyControlPolicies.release(
+                        self,
+                        CONTROL_ACTOR,
+                        sessionId,
+                        BodyControlClass.DIRECTED_ACTION,
+                        BodyControlClass.DIRECTED_ACTION.defaultPriority());
+            }
+        }
     }
 }
