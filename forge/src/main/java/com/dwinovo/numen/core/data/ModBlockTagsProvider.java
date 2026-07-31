@@ -17,7 +17,7 @@ public final class ModBlockTagsProvider extends BlockTagsProvider {
     public ModBlockTagsProvider(PackOutput output,
                                 CompletableFuture<HolderLookup.Provider> lookupProvider,
                                 ExistingFileHelper existingFileHelper) {
-        super(output, lookupProvider, Constants.MOD_ID, existingFileHelper);
+        super(output, lookupProvider, Constants.CONTENT_NAMESPACE, existingFileHelper);
     }
 
     @Override

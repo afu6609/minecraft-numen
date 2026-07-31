@@ -17,10 +17,10 @@ import net.minecraftforge.fml.loading.FMLEnvironment;
 import java.nio.file.Path;
 
 /**
- * Forge entry point for the numen-core tool pack. Registers the tools and task
- * runners into the numen-api engine, then wires the server-tick work its tools
+ * Forge entry point for the Momo gameplay tool pack. Registers the tools and task
+ * runners into Momo Engine, then wires the server-tick work its tools
  * need (budget-sliced block scans, the off-thread pathfinder's chunk snapshots).
- * The engine itself is brought up by the separate numen-api mod, which core
+ * The engine itself is brought up by the separate momo_engine mod, which gameplay
  * depends on.
  *
  * <p>Forge keeps separate mod and game event buses, just like the NeoForge
@@ -34,7 +34,12 @@ public class NumenCoreForge {
         NumenCore.init();
 
         MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onServerTickPost);
-        MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onLivingDamage);
+        if (!com.dwinovo.numen.MomoIntegration.managedBodyMode()) {
+            // ThreatMemory belongs to the legacy survival/task chain. Momo's
+            // managed runtime samples damage and threats through its own
+            // combat/reflex services, so the legacy state must stay dormant.
+            MinecraftForge.EVENT_BUS.addListener(NumenCoreForge::onLivingDamage);
+        }
         MinecraftForge.EVENT_BUS.addListener((ServerStartedEvent e) ->
                 com.dwinovo.numen.core.server.BrainConfigCommands.bindServer(
                         e.getServer()));
@@ -46,8 +51,12 @@ public class NumenCoreForge {
         });
         // Debug verbs merged into the /numen root registered by the engine mod.
         MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.RegisterCommandsEvent e) -> {
-            com.dwinovo.numen.core.debug.DebugCommands.register(
-                    e.getDispatcher());
+            if (!com.dwinovo.numen.MomoIntegration.managedBodyMode()) {
+                // Includes legacy debug goto/mine/stop commands and therefore
+                // must not bypass Momo's authoritative body task bus.
+                com.dwinovo.numen.core.debug.DebugCommands.register(
+                        e.getDispatcher());
+            }
             com.dwinovo.numen.core.server.BrainConfigCommands.register(
                     e.getDispatcher());
         });
@@ -59,7 +68,8 @@ public class NumenCoreForge {
             declareBundledSkills();
         }
 
-        Constants.LOG.info("numen-core initialised on Forge.");
+        Constants.LOG.info(
+                "Momo Gameplay initialised on Forge (Numen LGPL transition ABI retained).");
     }
 
     private static void declareBundledSkills() {
@@ -67,7 +77,7 @@ public class NumenCoreForge {
         if (root != null) {
             SkillRegistry.instance().declareBundled(root);
         } else {
-            Constants.LOG.warn("[numen-core] no bundled skills/ dir found in jar");
+            Constants.LOG.warn("[momo-gameplay] no bundled skills/ dir found in jar");
         }
     }
 
@@ -78,10 +88,13 @@ public class NumenCoreForge {
         MinecraftServer server = event.getServer();
         // 排程机器的心跳随机器归了 numen-api;core 只 tick 自己的工具配套。
         ScanBlocksJob.tick(server);
-        PathCaches.serverTick(server);
         com.dwinovo.numen.core.server.BrainConfigCommands.serverTick(server);
-        // Debug particles for pathing state, sent only to players with debug on.
-        com.dwinovo.numen.core.debug.PathDebugRenderer.serverTick(server);
+        if (!com.dwinovo.numen.MomoIntegration.managedBodyMode()) {
+            PathCaches.serverTick(server);
+            // Legacy pathing diagnostics are meaningless once Momo owns all
+            // locomotion and would otherwise retain unused cache state.
+            com.dwinovo.numen.core.debug.PathDebugRenderer.serverTick(server);
+        }
     }
 
     private static void onLivingDamage(LivingDamageEvent event) {

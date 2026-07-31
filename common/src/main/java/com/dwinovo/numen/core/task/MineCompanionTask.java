@@ -17,6 +17,10 @@ import com.dwinovo.numen.core.scan.BlockScanner;
 import com.dwinovo.numen.core.scan.ScanExecutor;
 import com.dwinovo.numen.core.task.base.AbstractCompanionTask;
 import com.dwinovo.numen.core.task.base.Precondition;
+import com.dwinovo.numen.task.control.BodyControlClass;
+import com.dwinovo.numen.task.control.BodyControlPolicies;
+import com.dwinovo.numen.task.navigation.BodyNavigationPort;
+import com.dwinovo.numen.task.navigation.BodyNavigationPorts;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -127,8 +131,56 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private static final int MAX_BLACKLISTED_TARGETS = 24;
     /** Let a path-arrived body settle onto real support before declaring its return unusable. */
     private static final int MAX_RETURN_SETTLE_TICKS = 40;
+    /** One fresh exact-route retry after a stale/invalid first return. */
+    private static final int MAX_PORT_RETURN_ATTEMPTS = 2;
+    /** Keep retrying a failed detach across ticks before the write fence takes over. */
+    private static final int MAX_PORT_DETACH_RETRY_TICKS = 20;
+    /**
+     * Worst-case scheduler reserve: frozen work detach, exact-entry detach,
+     * then the terminal detach fence may each consume one bounded window.
+     */
+    private static final long PORT_DETACH_DEADLINE_RESERVE_TICKS =
+            3L * MAX_PORT_DETACH_RETRY_TICKS;
     /** Reserve at least this much after the work deadline before scheduler timeout. */
     private static final long MIN_RETURN_RESERVE_TICKS = 30L * 20L;
+    /**
+     * Require a genuinely adjacent mining stance. Using the player's full
+     * interaction reach here lets a provider declare arrival through a solid
+     * wall before BlockDigger has line of sight, so no later terrain-capable
+     * planner could ever open the passage.
+     */
+    private static final double PORT_BLOCK_ARRIVAL_RADIUS = 1.1;
+    private static final double PORT_ITEM_ARRIVAL_RADIUS = 1.0;
+    private static final String LLM_CONTROL_ACTOR = "numen-chain:llm";
+    /** Item pickup and exact return never receive terrain-edit authority. */
+    private static final BodyNavigationPort.TerrainAllowance PORT_SAFE_ALLOWANCE =
+            new BodyNavigationPort.TerrainAllowance(
+                    0,
+                    0,
+                    0,
+                    false,
+                    false);
+    /** Hard ceiling shared by every ore approach in one public mine task. */
+    private static final int PORT_TASK_MAX_BROKEN_BLOCKS = 32;
+    private static final int PORT_TASK_MAX_BREAK_TICKS = 6_400;
+
+    /**
+     * One backend owns the whole public mine task. Only the very first
+     * UNSUPPORTED admission may select PlayerNav; an accepted provider can
+     * never silently fall through to the legacy body writer later.
+     */
+    private enum NavigationBackend {
+        UNDECIDED,
+        PORT,
+        LEGACY
+    }
+
+    private enum PortOperationKind {
+        NONE,
+        BLOCK,
+        ITEM,
+        RETURN
+    }
 
     private final List<BlockPos> knownOres = new ArrayList<>();
     private final Set<BlockPos> blacklist = new HashSet<>();
@@ -181,6 +233,19 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     private int returnSettleTicks;
     /** Active task ticks left in the independent return watchdog. */
     private long returnTicksRemaining;
+    private NavigationBackend backend = NavigationBackend.UNDECIDED;
+    private BodyNavigationPort.Operation portOperation;
+    private PortOperationKind portOperationKind = PortOperationKind.NONE;
+    private BlockPos portBlockTarget;
+    private ItemEntity portItemTarget;
+    private int portBrokenBlocks;
+    private int portBreakTicks;
+    private int portScaffoldBlocks;
+    private int portReturnAttempts;
+    private int portDetachRetryTicks;
+    private String pendingPortTrapReason;
+    private boolean pendingOutcomeDetach;
+    private boolean portDetachFailed;
 
     // Progressive dig (blocks break tick-by-tick at legitimate player speed, not
     // instabreak) — shared with the path executor so all breaking reads the same.
@@ -233,6 +298,17 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     @Override
     protected void onStart() {
         long workDeadline = r.getDeadlineGameTime();
+        backend = NavigationBackend.UNDECIDED;
+        portOperation = null;
+        clearPortOperationTarget();
+        portBrokenBlocks = 0;
+        portBreakTicks = 0;
+        portScaffoldBlocks = 0;
+        portReturnAttempts = 0;
+        portDetachRetryTicks = 0;
+        pendingPortTrapReason = null;
+        pendingOutcomeDetach = false;
+        portDetachFailed = false;
         entryDimension = player.level().dimension().location().toString();
         returnGuard = new MineReturnGuard(feet());
         // LlmTaskChain checks the record deadline before invoking onTick. Keep a
@@ -265,6 +341,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
 
     @Override
     protected TaskState onTick() {
+        if (player.isDeadOrDying()) {
+            stopNavigation("mine body died");
+            return TaskState.CANCELLED;
+        }
         if (returnGuard != null && returnGuard.phase() != MineReturnGuard.Phase.WORKING) {
             return tickReturn();
         }
@@ -337,7 +417,13 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         //    a tree gets mined from beside, never by digging under it.
         BlockPos reachable = reachableTarget();
         if (reachable != null) {
-            stopNav();
+            if (!stopNavigation("selected mine target is already reachable")) {
+                return requestOutcome(
+                        TaskState.FAILED,
+                        "could not safely detach delegated navigation before "
+                                + "breaking a reachable target",
+                        FailureType.INTERRUPTED);
+            }
             // Keep the goal boxes visible while mining in place: the path executor is
             // paused, but the target overlay should persist. stopNav just
             // cleared the overlay, so re-publish the ore field boxes — otherwise the
@@ -349,8 +435,20 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
 
         // 2) Head for the ore field + nearby drops (GoalComposite), arriving when a
         //    shaft opens up; drops are collected by walking over them (native pickup).
-        if (!knownOres.isEmpty() || !drops.isEmpty()) {
+        boolean hasPortWorkOperation =
+                backend == NavigationBackend.PORT
+                        && portOperation != null
+                        && portOperationKind != PortOperationKind.RETURN;
+        if (!knownOres.isEmpty() || !drops.isEmpty() || hasPortWorkOperation) {
             branchTicks = 0;
+            if (backend != NavigationBackend.LEGACY) {
+                TaskState portState = tickPortWorkNavigation(gathered);
+                if (portState != null) {
+                    return portState;
+                }
+                // null is the sole compatibility transition: the first
+                // provider request returned UNSUPPORTED and selected LEGACY.
+            }
             if (nav == null || navIsBranch) {
                 if (level.getGameTime() < navRetryAfterTick) {
                     return TaskState.RUNNING;
@@ -431,7 +529,7 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         //    opt-in explore mode branch-mines outward for more. So
         //    finish with whatever we gathered (the tool's contract: "fewer than count
         //    in range still succeeds"), rather than running off across the world.
-        if (!EXPLORE_FOR_BLOCKS) {
+        if (!EXPLORE_FOR_BLOCKS || backend != NavigationBackend.LEGACY) {
             if (!capacityBlocked.isEmpty()) {
                 return capacityBlockedFailure();
             }
@@ -477,6 +575,286 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         return TaskState.RUNNING;
     }
 
+    // ---- capability-gated native work navigation ----
+
+    /**
+     * Drive one native ore/item approach at a time. A {@code null} result is
+     * intentionally reserved for the first-request UNSUPPORTED transition to
+     * the legacy backend; every PORT state returns a concrete task state.
+     */
+    private TaskState tickPortWorkNavigation(int gathered) {
+        if (backend == NavigationBackend.LEGACY) {
+            return null;
+        }
+
+        if (portOperation != null) {
+            if (portOperationKind == PortOperationKind.RETURN) {
+                return requestOutcome(
+                        TaskState.FAILED,
+                        "delegated return operation leaked into the mining phase",
+                        FailureType.UNKNOWN);
+            }
+            if (portOperationKind == PortOperationKind.BLOCK
+                    && (portBlockTarget == null
+                            || !knownOres.contains(portBlockTarget))) {
+                if (!cancelPortOperation(
+                        "selected mine target vanished or changed")) {
+                    return requestOutcome(
+                            TaskState.FAILED,
+                            "could not safely detach navigation from a changed "
+                                    + "mine target",
+                            FailureType.INTERRUPTED);
+                }
+            } else if (portOperationKind == PortOperationKind.ITEM
+                    && !validPortItemTarget()) {
+                if (!cancelPortOperation(
+                        "selected dropped item vanished or changed")) {
+                    return requestOutcome(
+                            TaskState.FAILED,
+                            "could not safely detach navigation from a changed "
+                                    + "dropped item",
+                            FailureType.INTERRUPTED);
+                }
+                drops = droppedItems();
+            } else {
+                return tickPortWorkOperation(gathered);
+            }
+        }
+
+        if (player.level().getGameTime() < navRetryAfterTick) {
+            return TaskState.RUNNING;
+        }
+
+        BlockPos blockTarget =
+                knownOres.isEmpty() ? null : knownOres.get(0);
+        ItemEntity itemTarget = nearestTrackedDrop();
+        boolean chooseItem =
+                itemTarget != null
+                        && (blockTarget == null
+                                || player.distanceToSqr(itemTarget)
+                                        < player.distanceToSqr(
+                                                Vec3.atCenterOf(blockTarget)));
+
+        BodyNavigationPort.StartResult started;
+        PortOperationKind kind;
+        if (chooseItem) {
+            kind = PortOperationKind.ITEM;
+            started = startPortItemApproach(itemTarget);
+        } else if (blockTarget != null) {
+            kind = PortOperationKind.BLOCK;
+            started = startPortBlockApproach(blockTarget);
+        } else {
+            // Only an anticipated drop cell remains. Wait for the live entity
+            // because the native contract follows its UUID, not a stale cell.
+            return TaskState.RUNNING;
+        }
+        return admitPortWorkOperation(
+                started,
+                kind,
+                blockTarget,
+                itemTarget);
+    }
+
+    private TaskState admitPortWorkOperation(
+            BodyNavigationPort.StartResult started,
+            PortOperationKind kind,
+            BlockPos blockTarget,
+            ItemEntity itemTarget) {
+        return switch (started.disposition()) {
+            case ACCEPTED -> {
+                backend = NavigationBackend.PORT;
+                portOperation = started.operation();
+                portOperationKind = kind;
+                portBlockTarget = kind == PortOperationKind.BLOCK
+                        ? blockTarget.immutable()
+                        : null;
+                portItemTarget =
+                        kind == PortOperationKind.ITEM ? itemTarget : null;
+                yield TaskState.RUNNING;
+            }
+            case UNSUPPORTED -> {
+                if (backend == NavigationBackend.PORT) {
+                    yield requestOutcome(
+                            TaskState.FAILED,
+                            "delegated mine navigation became unsupported after "
+                                    + "this task committed to it: "
+                                    + startMessage(started),
+                            FailureType.UNSUPPORTED);
+                }
+                backend = NavigationBackend.LEGACY;
+                yield null;
+            }
+            case REJECTED -> {
+                // REJECTED is never a safe fallback signal: a provider may
+                // already have performed admission-side work.
+                backend = NavigationBackend.PORT;
+                yield requestOutcome(
+                        TaskState.FAILED,
+                        "could not start delegated mine navigation: "
+                                + startMessage(started),
+                        FailureType.UNKNOWN);
+            }
+        };
+    }
+
+    private TaskState tickPortWorkOperation(int gathered) {
+        BodyNavigationPort.Snapshot snapshot;
+        try {
+            snapshot = portOperation.snapshot();
+            if (snapshot == null) {
+                throw new IllegalStateException(
+                        "navigation provider returned no snapshot");
+            }
+        } catch (RuntimeException failure) {
+            cancelPortOperation(
+                    "delegated mine navigation status failed");
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "delegated mine navigation status failed: "
+                            + safeMessage(failure),
+                    FailureType.UNKNOWN);
+        }
+
+        return switch (snapshot.state()) {
+            case PLANNING, MOVING -> TaskState.RUNNING;
+            case ARRIVED -> finishPortWorkArrival(gathered);
+            case FAILED -> finishPortWorkFailure(snapshot);
+            case CANCELLED -> {
+                cancelPortOperation(
+                        "provider cancelled delegated mine navigation");
+                yield requestOutcome(
+                        TaskState.FAILED,
+                        "delegated mine navigation was cancelled before its "
+                                + "target was verified",
+                        FailureType.INTERRUPTED);
+            }
+            case HOLDING -> {
+                cancelPortOperation(
+                        "mine approach returned follow-only HOLDING state");
+                yield requestOutcome(
+                        TaskState.FAILED,
+                        "delegated mine navigation returned the follow-only "
+                                + "HOLDING state",
+                        FailureType.UNKNOWN);
+            }
+        };
+    }
+
+    private TaskState finishPortWorkArrival(int gathered) {
+        PortOperationKind arrivedKind = portOperationKind;
+        BlockPos arrivedBlock = portBlockTarget;
+        ItemEntity arrivedItem = portItemTarget;
+        if (!cancelPortOperation(
+                "delegated mine approach reported arrival")) {
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "the navigation provider reported arrival but could not be "
+                            + "safely detached",
+                    FailureType.INTERRUPTED);
+        }
+
+        if (arrivedKind == PortOperationKind.ITEM) {
+            if (arrivedItem == null || arrivedItem.isRemoved()) {
+                drops = droppedItems();
+                return TaskState.RUNNING;
+            }
+            if (player.distanceToSqr(arrivedItem)
+                    <= DROP_PICKUP_REACH_SQR) {
+                beginDropConfirmation(arrivedItem, gathered);
+                return TaskState.RUNNING;
+            }
+            blacklist.add(arrivedItem.blockPosition().immutable());
+            drops = droppedItems();
+            if (recordNavigationFailure(
+                    "provider reported dropped-item arrival outside the "
+                            + "verified pickup radius")) {
+                return tickReturn();
+            }
+            return TaskState.RUNNING;
+        }
+
+        if (arrivedKind != PortOperationKind.BLOCK
+                || arrivedBlock == null) {
+            return requestOutcome(
+                    TaskState.FAILED,
+                    "delegated mine navigation arrived without a bound target",
+                    FailureType.UNKNOWN);
+        }
+        prune();
+        if (!knownOres.contains(arrivedBlock)) {
+            return TaskState.RUNNING;
+        }
+        if (reachableTarget() != null) {
+            return TaskState.RUNNING;
+        }
+
+        blacklist.add(arrivedBlock.immutable());
+        knownOres.remove(arrivedBlock);
+        if (recordNavigationFailure(
+                "provider arrived at an unusable mining stance")) {
+            return tickReturn();
+        }
+        return TaskState.RUNNING;
+    }
+
+    private TaskState finishPortWorkFailure(
+            BodyNavigationPort.Snapshot snapshot) {
+        PortOperationKind failedKind = portOperationKind;
+        BlockPos failedBlock = portBlockTarget;
+        ItemEntity failedItem = portItemTarget;
+        BodyNavigationPort.FailureKind providerFailure =
+                snapshot.failure();
+        String reason = snapshotMessage(
+                snapshot,
+                "delegated mine navigation failed");
+        if (!cancelPortOperation(
+                "delegated mine navigation failed")) {
+            return requestOutcome(
+                    TaskState.FAILED,
+                    reason + "; provider cancellation also failed",
+                    FailureType.INTERRUPTED);
+        }
+
+        // A live target disappearing is ordinary mining contention, not a
+        // route defect. Rescan instead of poisoning the failure circuit.
+        if (providerFailure == BodyNavigationPort.FailureKind.TARGET_LOST) {
+            if (failedKind == PortOperationKind.BLOCK
+                    && failedBlock != null) {
+                knownOres.remove(failedBlock);
+            }
+            drops = droppedItems();
+            return TaskState.RUNNING;
+        }
+
+        if (failedKind == PortOperationKind.BLOCK
+                && failedBlock != null) {
+            blacklist.add(failedBlock.immutable());
+            knownOres.remove(failedBlock);
+        } else if (failedKind == PortOperationKind.ITEM
+                && failedItem != null
+                && !failedItem.isRemoved()) {
+            blacklist.add(failedItem.blockPosition().immutable());
+            drops = droppedItems();
+        }
+        if (recordNavigationFailure(
+                reason + " (" + mapFailure(providerFailure) + ")")) {
+            return tickReturn();
+        }
+        return TaskState.RUNNING;
+    }
+
+    private boolean validPortItemTarget() {
+        return portItemTarget != null
+                && !portItemTarget.isRemoved()
+                && dropItems.contains(
+                        portItemTarget.getItem().getItem())
+                && PlayerInv.canAcceptMain(
+                        player.getInventory(),
+                        portItemTarget.getItem())
+                && !blacklist.contains(
+                        portItemTarget.blockPosition());
+    }
+
     // ---- authoritative return-to-entry phase ----
 
     private TaskState requestOutcome(
@@ -495,27 +873,39 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             return;
         }
         boolean alreadyAtEntry = atEntryAnchor();
-        returnGuard.request(state, message, failureType, alreadyAtEntry);
-        if (!returnGuard.returning()) {
-            return;
-        }
 
-        // Freeze the completed mining outcome before any return work. No target
-        // selection, digging, or background scan may resume during this phase.
-        stopNav();
+        // Freeze the completed mining outcome even when the body is already at
+        // entry. No accepted provider, target dig, or background scan may
+        // survive the terminal decision.
+        boolean navigationDetached = stopNavigation(
+                "mining outcome frozen before return");
         digger.cancel();
         if (scan != null) {
             scan.cancel(true);
             scan = null;
         }
+        pendingOutcomeDetach = !navigationDetached;
+        portDetachRetryTicks = 0;
+        returnGuard.request(state, message, failureType, alreadyAtEntry);
+        if (!returnGuard.returning()) {
+            return;
+        }
+
         returnSettleTicks = 0;
+        portReturnAttempts = 0;
+        pendingPortTrapReason = null;
         long now = player.level().getGameTime();
         returnTicksRemaining =
                 MineReturnGuard.returnBudgetTicks(feet(), returnGuard.entry());
         // TaskRecord deadlines can only move later, so they cannot bound an
         // early-finishing long mine job. The local active-tick watchdog below is
-        // authoritative; this outer deadline is one tick later as a scheduler fuse.
-        r.extendDeadlineTo(now + returnTicksRemaining + 1L);
+        // authoritative; the outer scheduler fuse also reserves the bounded
+        // provider-detach window before the local travel budget starts burning.
+        r.extendDeadlineTo(
+                now
+                        + returnTicksRemaining
+                        + PORT_DETACH_DEADLINE_RESERVE_TICKS
+                        + 1L);
     }
 
     private TaskState tickReturn() {
@@ -523,6 +913,12 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
             fail("TRAPPED: mining return guard was not initialized",
                     FailureType.TRAPPED);
             return TaskState.FAILED;
+        }
+        if (pendingOutcomeDetach) {
+            return tickPendingOutcomeDetach();
+        }
+        if (pendingPortTrapReason != null) {
+            return tickPendingPortDetach();
         }
         MineReturnGuard.Completion ready = returnGuard.completion();
         if (ready != null) {
@@ -537,25 +933,38 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         String currentDimension =
                 player.level().dimension().location().toString();
         if (!entryDimension.equals(currentDimension)) {
-            returnGuard.markTrapped(
-                    feet(),
+            return trapPortReturn(
                     "dimension changed from " + entryDimension + " to "
                             + currentDimension + " during mining");
-            return finishReturn(returnGuard.completion());
         }
         if (atEntryAnchor()) {
-            stopNav();
+            if (!stopNavigation(
+                    "exact mining entry reached")) {
+                if (++portDetachRetryTicks
+                        < MAX_PORT_DETACH_RETRY_TICKS) {
+                    return TaskState.RUNNING;
+                }
+                return trapPortReturn(
+                        "exact mining entry was reached but delegated "
+                                + "navigation could not be detached");
+            }
+            portDetachRetryTicks = 0;
             returnGuard.markReturned();
             return finishReturn(returnGuard.completion());
         }
         if (returnTicksRemaining <= 0L) {
-            returnGuard.markTrapped(
-                    feet(),
+            return trapPortReturn(
                     "bounded return budget expired before entry was reached");
-            stopNav();
-            return finishReturn(returnGuard.completion());
         }
         returnTicksRemaining--;
+
+        if (backend != NavigationBackend.LEGACY) {
+            TaskState portState = tickPortReturn();
+            if (portState != null) {
+                return portState;
+            }
+            // null means the first exact-return request alone selected LEGACY.
+        }
 
         if (nav == null) {
             nav = PlayerNav.to(
@@ -591,6 +1000,246 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         }
         stopNav();
         return finishReturn(returnGuard.completion());
+    }
+
+    /**
+     * Drive the exact native return. Provider arrival is advisory; the existing
+     * entry-anchor predicate remains authoritative. A null result is the sole
+     * first-request UNSUPPORTED transition to legacy.
+     */
+    private TaskState tickPortReturn() {
+        if (backend == NavigationBackend.LEGACY) {
+            return null;
+        }
+        if (pendingPortTrapReason != null) {
+            return tickPendingPortDetach();
+        }
+        if (portOperation != null
+                && portOperationKind != PortOperationKind.RETURN) {
+            if (!cancelPortOperation(
+                    "mining outcome froze before the active approach stopped")) {
+                return trapPortReturn(
+                        "could not detach the active mine approach before return");
+            }
+        }
+
+        if (portOperation == null && returnSettleTicks > 0) {
+            if (++returnSettleTicks <= MAX_RETURN_SETTLE_TICKS) {
+                return TaskState.RUNNING;
+            }
+            return retryOrTrapPortReturn(
+                    "provider return reached an ungrounded or unusable entry "
+                            + "stance");
+        }
+
+        if (portOperation == null) {
+            if (portReturnAttempts >= MAX_PORT_RETURN_ATTEMPTS) {
+                return trapPortReturn(
+                        "exact native return exhausted its bounded route "
+                                + "attempts");
+            }
+            BodyNavigationPort.StartResult started = startPortReturn();
+            switch (started.disposition()) {
+                case ACCEPTED -> {
+                    backend = NavigationBackend.PORT;
+                    portReturnAttempts++;
+                    portOperation = started.operation();
+                    portOperationKind = PortOperationKind.RETURN;
+                    portBlockTarget = returnGuard.entry().immutable();
+                }
+                case UNSUPPORTED -> {
+                    if (backend == NavigationBackend.PORT) {
+                        return trapPortReturn(
+                                "delegated exact return became unsupported after "
+                                        + "this mine task committed to the "
+                                        + "provider: "
+                                        + startMessage(started));
+                    }
+                    backend = NavigationBackend.LEGACY;
+                    return null;
+                }
+                case REJECTED -> {
+                    backend = NavigationBackend.PORT;
+                    return trapPortReturn(
+                            "could not start delegated exact return: "
+                                    + startMessage(started));
+                }
+            }
+        }
+
+        BodyNavigationPort.Snapshot snapshot;
+        try {
+            snapshot = portOperation.snapshot();
+            if (snapshot == null) {
+                throw new IllegalStateException(
+                        "navigation provider returned no snapshot");
+            }
+        } catch (RuntimeException failure) {
+            String reason = "delegated exact return status failed: "
+                    + safeMessage(failure);
+            if (!cancelPortOperation(
+                    "delegated exact return status failed")) {
+                return trapPortReturn(reason);
+            }
+            return retryOrTrapPortReturn(reason);
+        }
+
+        return switch (snapshot.state()) {
+            case PLANNING, MOVING -> TaskState.RUNNING;
+            case ARRIVED -> {
+                if (!cancelPortOperation(
+                        "delegated exact return reported arrival")) {
+                    yield trapPortReturn(
+                            "provider return arrived but could not be detached");
+                }
+                if (atEntryAnchor()) {
+                    returnGuard.markReturned();
+                    yield finishReturn(returnGuard.completion());
+                }
+                returnSettleTicks = 1;
+                yield TaskState.RUNNING;
+            }
+            case FAILED -> {
+                String reason = snapshotMessage(
+                        snapshot,
+                        "delegated exact return failed");
+                BodyNavigationPort.FailureKind failure =
+                        snapshot.failure();
+                if (!cancelPortOperation(
+                        "delegated exact return failed")) {
+                    yield trapPortReturn(reason);
+                }
+                yield retryableReturnFailure(failure)
+                        ? retryOrTrapPortReturn(reason)
+                        : trapPortReturn(reason);
+            }
+            case CANCELLED -> {
+                if (!cancelPortOperation(
+                        "provider cancelled delegated exact return")) {
+                    yield trapPortReturn(
+                            "delegated exact return was cancelled and could "
+                                    + "not be detached");
+                }
+                yield trapPortReturn(
+                        "delegated exact return was cancelled before entry "
+                                + "verification");
+            }
+            case HOLDING -> {
+                if (!cancelPortOperation(
+                        "exact return returned follow-only HOLDING state")) {
+                    yield trapPortReturn(
+                            "delegated exact return returned HOLDING and "
+                                    + "could not be detached");
+                }
+                yield trapPortReturn(
+                        "delegated exact return returned the follow-only "
+                                + "HOLDING state");
+            }
+        };
+    }
+
+    private TaskState retryOrTrapPortReturn(String reason) {
+        returnSettleTicks = 0;
+        if (portReturnAttempts < MAX_PORT_RETURN_ATTEMPTS
+                && returnTicksRemaining > 0L) {
+            progressNote = "returning to the exact mining entry after a fresh "
+                    + "safe replan";
+            return TaskState.RUNNING;
+        }
+        return trapPortReturn(reason);
+    }
+
+    private static boolean retryableReturnFailure(
+            BodyNavigationPort.FailureKind failure) {
+        return failure == BodyNavigationPort.FailureKind.NO_PATH
+                || failure == BodyNavigationPort.FailureKind.BOXED_IN
+                || failure == BodyNavigationPort.FailureKind.HAZARD
+                || failure == BodyNavigationPort.FailureKind.INTERNAL;
+    }
+
+    private TaskState trapPortReturn(String reason) {
+        if (portOperation != null
+                && !cancelPortOperation(
+                        "detaching failed exact return before terminal result")) {
+            pendingPortTrapReason = reason;
+            portDetachRetryTicks = 0;
+            return TaskState.RUNNING;
+        }
+        super.stopNav();
+        navIsBranch = false;
+        returnGuard.markTrapped(feet(), reason);
+        return finishReturn(returnGuard.completion());
+    }
+
+    private TaskState tickPendingPortDetach() {
+        String reason = pendingPortTrapReason;
+        if (cancelPortOperation(
+                "retrying exact-return detach before terminal result")) {
+            pendingPortTrapReason = null;
+            portDetachRetryTicks = 0;
+            super.stopNav();
+            navIsBranch = false;
+            returnGuard.markTrapped(feet(), reason);
+            return finishReturn(returnGuard.completion());
+        }
+        if (++portDetachRetryTicks < MAX_PORT_DETACH_RETRY_TICKS) {
+            return TaskState.RUNNING;
+        }
+
+        // The enclosing task cleanup releases its control lease immediately
+        // after this result, so even a broken provider cannot write through the
+        // generation fence. Keep the leaked handle for cleanup's final retry.
+        pendingPortTrapReason = null;
+        portDetachFailed = true;
+        super.stopNav();
+        navIsBranch = false;
+        returnGuard.markTrapped(
+                feet(),
+                reason + "; navigation detach did not acknowledge within "
+                        + MAX_PORT_DETACH_RETRY_TICKS + " ticks");
+        return finishReturn(returnGuard.completion());
+    }
+
+    private TaskState tickPendingOutcomeDetach() {
+        if (cancelPortOperation(
+                "retrying frozen mine outcome detach")) {
+            pendingOutcomeDetach = false;
+            portDetachRetryTicks = 0;
+            MineReturnGuard.Completion completion =
+                    returnGuard.completion();
+            return completion == null
+                    ? TaskState.RUNNING
+                    : finishReturn(completion);
+        }
+        if (++portDetachRetryTicks < MAX_PORT_DETACH_RETRY_TICKS) {
+            return TaskState.RUNNING;
+        }
+
+        // Do not report the frozen work result while an accepted provider has
+        // failed to acknowledge detachment. Task cleanup immediately releases
+        // the enclosing control lease, making the write fence authoritative.
+        pendingOutcomeDetach = false;
+        portDetachFailed = true;
+        String reason = "delegated navigation did not detach within "
+                + MAX_PORT_DETACH_RETRY_TICKS
+                + " ticks after the mine outcome was frozen";
+        if (returnGuard.returning()) {
+            returnGuard.markTrapped(feet(), reason);
+            return finishReturn(returnGuard.completion());
+        }
+
+        MineReturnGuard.Completion frozen = returnGuard.completion();
+        fail(
+                "CONTROL_DETACH_FAILED: " + reason
+                        + "; the body was already at the verified mining entry, "
+                        + "but the enclosing lease fence had to stop further "
+                        + "provider writes"
+                        + (frozen == null
+                                ? ""
+                                : ". Original mining outcome: "
+                                        + frozen.message()),
+                FailureType.INTERRUPTED);
+        return TaskState.FAILED;
     }
 
     private TaskState finishReturn(MineReturnGuard.Completion completion) {
@@ -853,11 +1502,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
     }
 
     /**
-     * The "shaft" test: a known target in the body's OWN feet column (x/z match),
-     * at or above feet, still solid, and reachable (within reach distance AND with
-     * a clear sight line). Mined in place, no pathing. The A* stance goal is what
-     * gets the body INTO the column; this only fires once it's there. No
-     * reach-from-the-side shortcut.
+     * A target the real body can currently mine: stable feet, server reach, and
+     * an unobstructed shot. Native approach deliberately chooses an adjacent
+     * stance, so side reach is valid; BlockDigger remains the authoritative
+     * progressive break.
      */
     private BlockPos reachableTarget() {
         if (!player.onGround()) return null;
@@ -867,10 +1515,19 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
         for (BlockPos ore : knownOres) {
-            if (ore.getX() != feet.getX() || ore.getZ() != feet.getZ()) continue;   // same column
-            if (ore.getY() < feet.getY()) continue;                                  // at or above feet
+            boolean sameColumn = ore.getX() == feet.getX()
+                    && ore.getZ() == feet.getZ();
+            if (backend != NavigationBackend.PORT) {
+                // Preserve the old shaft predicate for compatibility fallback.
+                if (!sameColumn || ore.getY() < feet.getY()) continue;
+            } else if (sameColumn && ore.getY() < feet.getY()) {
+                // Native mining opens a reversible side stair. Never bypass it
+                // by breaking the block supporting the body or a deeper block
+                // in the same column.
+                continue;
+            }
             if (level.getBlockState(ore).isAir()) continue;
-            if (!withinReach(ore) || !hasLineOfSight(eyes, ore)) continue;           // reachable
+            if (!withinReach(ore) || !hasLineOfSight(eyes, ore)) continue;
             double d = ore.distSqr(feet.above());
             if (d < bestD) {
                 bestD = d;
@@ -1253,15 +1910,247 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
                 FailureType.NO_MATERIAL);
     }
 
+    // ---- native navigation admission / ownership ----
+
+    private BodyNavigationPort.StartResult startPortBlockApproach(
+            BlockPos target) {
+        try {
+            Set<BodyNavigationPort.BlockPosition> protectedPositions =
+                    new HashSet<>();
+            for (BlockPos ore : knownOres) {
+                protectedPositions.add(portPosition(ore));
+            }
+            protectedPositions.add(portPosition(target));
+            return BodyNavigationPorts.startApproachBlock(
+                    new BodyNavigationPort.ApproachBlockRequest(
+                            portBinding(),
+                            portPosition(target),
+                            PORT_BLOCK_ARRIVAL_RADIUS,
+                            remainingMineTerrainAllowance(),
+                            protectedPositions));
+        } catch (RuntimeException failure) {
+            return BodyNavigationPort.StartResult.rejected(
+                    "navigation provider start failed: "
+                            + safeMessage(failure));
+        }
+    }
+
+    private BodyNavigationPort.TerrainAllowance
+            remainingMineTerrainAllowance() {
+        int remainingBlocks = Math.max(
+                0,
+                PORT_TASK_MAX_BROKEN_BLOCKS - portBrokenBlocks);
+        int remainingTicks = Math.max(
+                0,
+                PORT_TASK_MAX_BREAK_TICKS - portBreakTicks);
+        if (remainingBlocks == 0 || remainingTicks == 0) {
+            return PORT_SAFE_ALLOWANCE;
+        }
+        return new BodyNavigationPort.TerrainAllowance(
+                remainingBlocks,
+                remainingTicks,
+                0,
+                false,
+                true);
+    }
+
+    private BodyNavigationPort.StartResult startPortItemApproach(
+            ItemEntity target) {
+        try {
+            return BodyNavigationPorts.startApproachItem(
+                    new BodyNavigationPort.ApproachItemRequest(
+                            portBinding(),
+                            target.getUUID(),
+                            PORT_ITEM_ARRIVAL_RADIUS,
+                            PORT_SAFE_ALLOWANCE));
+        } catch (RuntimeException failure) {
+            return BodyNavigationPort.StartResult.rejected(
+                    "navigation provider start failed: "
+                            + safeMessage(failure));
+        }
+    }
+
+    private BodyNavigationPort.StartResult startPortReturn() {
+        try {
+            return BodyNavigationPorts.startMoveBlock(
+                    new BodyNavigationPort.MoveBlockRequest(
+                            portBinding(),
+                            portPosition(returnGuard.entry())));
+        } catch (RuntimeException failure) {
+            return BodyNavigationPort.StartResult.rejected(
+                    "navigation provider start failed: "
+                            + safeMessage(failure));
+        }
+    }
+
+    private BodyNavigationPort.ControlBinding portBinding() {
+        var control = BodyControlPolicies.requestFor(
+                player,
+                LLM_CONTROL_ACTOR,
+                r.publicId(),
+                BodyControlClass.DIRECTED_ACTION,
+                BodyControlClass.DIRECTED_ACTION.defaultPriority());
+        if (!BodyControlPolicies.owns(control)) {
+            throw new IllegalStateException(
+                    "the exact Numen mine task session does not own body "
+                            + "control");
+        }
+        return new BodyNavigationPort.ControlBinding(control);
+    }
+
+    private static BodyNavigationPort.BlockPosition portPosition(
+            BlockPos pos) {
+        return new BodyNavigationPort.BlockPosition(
+                pos.getX(),
+                pos.getY(),
+                pos.getZ());
+    }
+
+    private static String startMessage(
+            BodyNavigationPort.StartResult result) {
+        if (result == null) return "provider returned no result";
+        return result.message() == null || result.message().isBlank()
+                ? result.disposition().name().toLowerCase()
+                : result.message();
+    }
+
+    private static String snapshotMessage(
+            BodyNavigationPort.Snapshot snapshot,
+            String fallback) {
+        return snapshot.message() == null || snapshot.message().isBlank()
+                ? fallback
+                : snapshot.message();
+    }
+
+    private static FailureType mapFailure(
+            BodyNavigationPort.FailureKind failure) {
+        return switch (failure) {
+            case NO_PATH -> FailureType.NO_PATH;
+            case BOXED_IN -> FailureType.BOXED_IN;
+            case TARGET_LOST -> FailureType.TARGET_LOST;
+            case OUT_OF_RANGE -> FailureType.OUT_OF_REACH;
+            case CONTROL_LOST -> FailureType.INTERRUPTED;
+            case NO_MATERIAL -> FailureType.NO_MATERIAL;
+            case HAZARD -> FailureType.HAZARD;
+            case CAPABILITY_MISMATCH -> FailureType.UNSUPPORTED;
+            case NONE, INTERNAL -> FailureType.UNKNOWN;
+        };
+    }
+
+    private static String safeMessage(RuntimeException failure) {
+        String message = failure.getMessage();
+        return message == null || message.isBlank()
+                ? failure.getClass().getSimpleName()
+                : message;
+    }
+
+    /**
+     * Cancel synchronously before target changes, result freeze, return, or
+     * finalization. The guarded port deliberately allows retry after a throw,
+     * so make one immediate retry and retain the handle if both fail.
+     */
+    private boolean cancelPortOperation(String reason) {
+        BodyNavigationPort.Operation operation = portOperation;
+        if (operation == null) return true;
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            BodyNavigationPort.TerrainUsage usage;
+            try {
+                usage = operation.terrainUsage();
+                if (usage == null) {
+                    throw new IllegalStateException(
+                            "navigation provider returned no terrain usage");
+                }
+            } catch (RuntimeException failure) {
+                // Do not let a broken receipt keep an operation attached.
+                // Conservatively exhaust the task budget once cancellation
+                // succeeds, so a faulty provider cannot obtain more edits.
+                usage = new BodyNavigationPort.TerrainUsage(
+                        PORT_TASK_MAX_BROKEN_BLOCKS,
+                        PORT_TASK_MAX_BREAK_TICKS,
+                        0);
+                com.dwinovo.numen.Constants.LOG.warn(
+                        "[numen-task] delegated mine navigation terrain "
+                                + "receipt failed; exhausting task budget: {}",
+                        safeMessage(failure));
+            }
+            try {
+                operation.cancel(reason);
+                absorbPortTerrainUsage(usage);
+                portOperation = null;
+                clearPortOperationTarget();
+                return true;
+            } catch (RuntimeException failure) {
+                lastFailure = failure;
+                com.dwinovo.numen.Constants.LOG.warn(
+                        "[numen-task] delegated mine navigation cancel attempt "
+                                + "{} failed: {}",
+                        attempt,
+                        safeMessage(failure));
+            }
+        }
+        if (lastFailure != null) {
+            com.dwinovo.numen.Constants.LOG.error(
+                    "[numen-task] delegated mine navigation remains attached "
+                            + "after cancellation retries: {}",
+                    safeMessage(lastFailure));
+        }
+        return false;
+    }
+
+    private void absorbPortTerrainUsage(
+            BodyNavigationPort.TerrainUsage usage) {
+        portBrokenBlocks = saturatingAdd(
+                portBrokenBlocks,
+                usage.brokenBlocks(),
+                PORT_TASK_MAX_BROKEN_BLOCKS);
+        portBreakTicks = saturatingAdd(
+                portBreakTicks,
+                usage.breakTicks(),
+                PORT_TASK_MAX_BREAK_TICKS);
+        portScaffoldBlocks = saturatingAdd(
+                portScaffoldBlocks,
+                usage.scaffoldBlocks(),
+                Integer.MAX_VALUE);
+    }
+
+    private static int saturatingAdd(
+            int current,
+            int increment,
+            int ceiling) {
+        long sum = (long) current + increment;
+        return (int) Math.min(ceiling, sum);
+    }
+
+    private void clearPortOperationTarget() {
+        portOperationKind = PortOperationKind.NONE;
+        portBlockTarget = null;
+        portItemTarget = null;
+    }
+
     private boolean withinReach(BlockPos pos) {
         return player.distanceToSqr(Vec3.atCenterOf(pos)) <= REACH_SQR;
     }
 
-    /** Stop the nav AND clear the branch-mode flag (extends the base's nav release). */
-    @Override
-    protected void stopNav() {
+    private boolean stopNavigation(String reason) {
+        boolean portStopped = cancelPortOperation(reason);
         super.stopNav();
         navIsBranch = false;
+        return portStopped;
+    }
+
+    /** Stop either backend and clear the branch-mode flag. */
+    @Override
+    protected void stopNav() {
+        stopNavigation("mine navigation stopped");
+    }
+
+    @Override
+    public void suspend() {
+        if (backend == NavigationBackend.PORT) {
+            cancelPortOperation("mine task suspended for higher-priority work");
+        }
+        super.suspend();
     }
 
     @Override
@@ -1269,6 +2158,10 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         // super.cleanup() = stopNav() (nav.stop clears the overlay when a nav exists) + an explicit
         // so a task that finished while shaft-mining (nav == null) still
         // clears its lingering goal boxes. Then release the dig + any in-flight scan.
+        cancelPortOperation(
+                player.isDeadOrDying()
+                        ? "mine task finalized after body death"
+                        : "mine task finalized");
         super.cleanup();
         digger.cancel();
         if (scan != null) {
@@ -1286,16 +2179,30 @@ public final class MineCompanionTask extends AbstractCompanionTask<MineBlockTask
         data.put("final_x", player.getX());
         data.put("final_y", player.getY());
         data.put("final_z", player.getZ());
+        data.put("navigation_backend", backend.name().toLowerCase());
+        data.put("route_broken_blocks", portBrokenBlocks);
+        data.put("route_break_ticks", portBreakTicks);
+        data.put("route_scaffold_blocks", portScaffoldBlocks);
+        data.put("return_route_attempts", portReturnAttempts);
         if (returnGuard != null) {
             data.put("entry_x", returnGuard.entry().getX());
             data.put("entry_y", returnGuard.entry().getY());
             data.put("entry_z", returnGuard.entry().getZ());
             data.put("entry_dimension", entryDimension);
-            data.put("return_state", returnGuard.resultState());
+            data.put(
+                    "return_state",
+                    portDetachFailed
+                                    && returnGuard.phase()
+                                            != MineReturnGuard.Phase.TRAPPED
+                            ? "detach_failed"
+                            : returnGuard.resultState());
             data.put("safe_return_verified",
-                    returnGuard.phase() == MineReturnGuard.Phase.RETURNED);
+                    !portDetachFailed
+                            && returnGuard.phase()
+                                    == MineReturnGuard.Phase.RETURNED);
             data.put("return_ticks_remaining", Math.max(0L, returnTicksRemaining));
         }
+        data.put("navigation_detach_failed", portDetachFailed);
         return data;
     }
 

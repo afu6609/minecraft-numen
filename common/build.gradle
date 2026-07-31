@@ -13,11 +13,11 @@ minecraft {
 }
 
 dependencies {
-    // The numen-api engine (published to the local maven repo). compileOnly:
-    // the api classes are provided at runtime by the numen-api mod, not bundled.
-    compileOnly "com.dwinovo.numen:numen-api-common-1.20.1:${numen_api_version}"
+    // Momo Engine retains the attributed com.dwinovo.numen transition ABI.
+    // compileOnly: the engine classes are provided by the engine mod at runtime.
+    compileOnly "com.dwinovo.numen:momo-engine-common-1.20.1:${momo_engine_version}"
     // 单元测试要真的跑到引擎类(排程机器随 api),运行时类路径补上同一坐标。
-    testImplementation "com.dwinovo.numen:numen-api-common-1.20.1:${numen_api_version}"
+    testImplementation "com.dwinovo.numen:momo-engine-common-1.20.1:${momo_engine_version}"
 
     compileOnly group: 'org.spongepowered', name: 'mixin', version: '0.8.5'
     // fabric and forge both bundle mixinextras, so it is safe to use it in common

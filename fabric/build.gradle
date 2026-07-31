@@ -11,11 +11,11 @@ dependencies {
     mappings loom.officialMojangMappings()
     modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
-    // The numen-api engine, loaded as a mod dependency (resolved from the remote maven).
-    modImplementation "com.dwinovo.numen:numen-api-fabric-1.20.1:${numen_api_version}"
-    // Bundle it into core's jar (Jar-in-Jar) so players install one file and get
+    // Momo Engine, loaded as a mod dependency while retaining the LGPL ABI.
+    modImplementation "com.dwinovo.numen:momo-engine-fabric-1.20.1:${momo_engine_version}"
+    // Bundle it into the gameplay jar (Jar-in-Jar) so players install one file and get
     // both mods — exactly like including a library mod such as GeckoLib.
-    include "com.dwinovo.numen:numen-api-fabric-1.20.1:${numen_api_version}"
+    include "com.dwinovo.numen:momo-engine-fabric-1.20.1:${momo_engine_version}"
 }
 
 loom {

@@ -4,7 +4,7 @@ plugins {
 }
 
 base {
-    archivesName = "${mod_id}-${project.name}-${minecraft_version}"
+    archivesName = "${artifact_base_name}-${project.name}-${minecraft_version}"
 }
 
 java {
@@ -12,6 +12,20 @@ java {
     withSourcesJar()
     withJavadocJar()
 }
+
+def localMavenOverride = findProperty('local_maven_url')
+        ?.toString()
+        ?.trim()
+if (!localMavenOverride) {
+    localMavenOverride = System.getenv('local_maven_url')
+            ?.trim()
+}
+def localNumenMavenUrl = localMavenOverride
+        ? uri(localMavenOverride)
+        : rootProject.projectDir.parentFile
+                .toPath()
+                .resolve('numen-maven')
+                .toUri()
 
 // Javadoc comments here are written for source readers; strict doclint
 // (HTML-escaping every & and <, mandatory @param) fights that without
@@ -34,25 +48,19 @@ tasks.withType(JavaCompile).configureEach {
 
 repositories {
     mavenCentral()
-    // DEV MACHINES: resolve numen-api from the LOCAL numen-maven working tree when it
-    // exists as a sibling checkout — `./gradlew publish` in numen-api lands there
-    // directly, so the debug loop (publish → build → deploy) needs no push and no
-    // network. Declared FIRST so it wins; SNAPSHOT re-resolution is forced so every
-    // iteration picks the fresh jar. CI checkouts have no sibling numen-maven, so CI
-    // still resolves exclusively from the pushed remote. Formal releases: push
-    // numen-maven as before — the local tree and the remote are the same git repo.
-    def localNumenMaven = rootProject.projectDir.parentFile.toPath().resolve('numen-maven')
-    if (java.nio.file.Files.isDirectory(localNumenMaven)) {
-        maven {
-            name = 'numenLocalDebug'
-            url = "file:///${localNumenMaven.toString().replace('\\', '/')}"
-        }
-        configurations.configureEach {
-            resolutionStrategy.cacheChangingModulesFor(0, 'seconds')
-        }
+    // Resolve numen-api from the configured local repository first. Without
+    // an override this is the sibling ../numen-maven checkout populated by
+    // numen-api's publish task. Both -Plocal_maven_url and the environment
+    // variable of the same name are supported; the Gradle property wins.
+    maven {
+        name = 'numenLocalDebug'
+        url = localNumenMavenUrl
     }
-    // Published numen-api engine — always resolved from the public raw maven so
-    // this build (and CI) uses exactly what's been pushed, never a stale local copy.
+    configurations.configureEach {
+        resolutionStrategy.cacheChangingModulesFor(0, 'seconds')
+    }
+    // Remote fallback for CI or any checkout whose local repository does not
+    // contain the requested coordinate.
     maven {
         name = 'numenRemote'
         url = 'https://raw.githubusercontent.com/Dwinovo/numen-maven/main'
@@ -123,8 +131,8 @@ processResources {
             'forge_version_range'          : forge_version_range,
             'credits'                      : credits,
             'java_version'                 : java_version,
-            'numen_api_version'             : numen_api_version,
-            'numen_api_version_range'       : numen_api_version_range
+            'momo_engine_version'           : momo_engine_version,
+            'momo_engine_version_range'     : momo_engine_version_range
     ]
 
     var jsonExpandProps = expandProps.collectEntries {
@@ -151,7 +159,7 @@ publishing {
     }
     repositories {
         maven {
-            url System.getenv('local_maven_url')
+            url = localNumenMavenUrl
         }
     }
 }

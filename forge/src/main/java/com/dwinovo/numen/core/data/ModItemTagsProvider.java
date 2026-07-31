@@ -23,7 +23,7 @@ public final class ModItemTagsProvider extends ItemTagsProvider {
                                CompletableFuture<HolderLookup.Provider> lookupProvider,
                                CompletableFuture<TagsProvider.TagLookup<net.minecraft.world.level.block.Block>> blockTags,
                                ExistingFileHelper existingFileHelper) {
-        super(output, lookupProvider, blockTags, Constants.MOD_ID, existingFileHelper);
+        super(output, lookupProvider, blockTags, Constants.CONTENT_NAMESPACE, existingFileHelper);
     }
 
     @Override

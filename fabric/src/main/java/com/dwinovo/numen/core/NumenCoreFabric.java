@@ -35,6 +35,7 @@ public class NumenCoreFabric implements ModInitializer {
         CommandRegistrationCallback.EVENT.register(
                 (dispatcher, registryAccess, environment) -> DebugCommands.register(dispatcher));
 
-        Constants.LOG.info("numen-core initialised on Fabric.");
+        Constants.LOG.info(
+                "Momo Gameplay initialised on Fabric (Numen LGPL transition ABI retained).");
     }
 }

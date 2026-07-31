@@ -67,6 +67,13 @@ public final class NumenCore {
     public static void init() {
         if (initialised) return;
         initialised = true;
+        if (com.dwinovo.numen.MomoIntegration.managedBodyMode()) {
+            registerManagedModeTools();
+            Constants.LOG.info(
+                    "[momo-gameplay] managed-body mode registered the pure perception/orchestration whitelist; registry now contains {} tool(s); legacy tasks and survival chains disabled",
+                    ToolRegistry.size());
+            return;
+        }
         registerTools();
         registerTaskRunners();
         registerChains();
@@ -178,6 +185,38 @@ public final class NumenCore {
         ToolRegistry.register(new com.dwinovo.numen.core.tools.GetWorldInfoTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.TodoWriteTool());   // raw NumenTool
         ToolRegistry.register(new com.dwinovo.numen.core.tools.LoadSkillTool());   // raw NumenTool
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.PollCompanionEventsTool());
+        com.dwinovo.numen.core.combat.policy.tool.CombatPolicyToolRegistrar.registerAll();
+    }
+
+    /**
+     * Tools that cannot enqueue a legacy companion task or write any body input,
+     * inventory slot, GUI, block, or entity. Physical execution is registered by
+     * momo_embodied against its authoritative task coordinator.
+     */
+    private static void registerManagedModeTools() {
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.StructurePlanTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.StructureStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.StructurePatchTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.PlacementFeasibilityTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.GetSelfStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.GetOwnerStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.GetPlayerStatusTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundPlayerTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.LookupRecipeTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanNearbyEntitiesTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.combat.observe.ObserveEntityIntentTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.combat.observe.GetCombatTraceTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.ScanBlocksTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.LookAroundTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.ObserveVolumeTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.SurveySceneTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectObjectTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.InspectBlockStorageTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.GetWorldInfoTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.TodoWriteTool());
+        ToolRegistry.register(new com.dwinovo.numen.core.tools.LoadSkillTool());
         ToolRegistry.register(new com.dwinovo.numen.core.tools.PollCompanionEventsTool());
         com.dwinovo.numen.core.combat.policy.tool.CombatPolicyToolRegistrar.registerAll();
     }

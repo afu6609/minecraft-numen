@@ -1,3 +1,10 @@
+> **Momo managed fork:** Forge loads this perception/gameplay pack as
+> `momo_gameplay`, depending on `momo_engine`. When `momo_embodied` is present,
+> the legacy fake-player lifecycle, scheduler, survival chains, path cache, and
+> physical tools are disabled; only the perception/orchestration whitelist is
+> registered. `com.dwinovo.numen`, `config/numen/**`, world data, and protocol
+> contracts remain an attributed GNU LGPL v3.0 compatibility ABI.
+
 <div align="center">
 
 # Numen · 言出法随
@@ -152,7 +159,7 @@ Every tool and skill Numen ships is written entirely against the public API — 
 
 ```gradle
 repositories { maven { url = 'https://raw.githubusercontent.com/Dwinovo/numen-maven/main' } }
-dependencies  { modImplementation "com.dwinovo.numen:numen-api-fabric-1.21.1:<version>" }
+dependencies  { modImplementation "com.dwinovo.numen:momo-engine-fabric-1.21.1:<version>" }
 ```
 
 The public integration API is **MIT**-licensed — write tools, skills, and compat without LGPL strings attached. The getting-started guide, full examples, and version matrix live in [numen-api's README](https://github.com/Dwinovo/numen-api).

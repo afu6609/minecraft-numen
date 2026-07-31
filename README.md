@@ -1,3 +1,9 @@
+> **Momo 托管分支：** Forge 现在以 `momo_gameplay` 加载本玩法/感知包，并
+> 依赖 `momo_engine`。检测到 `momo_embodied` 时，旧假玩家生命周期、调度器、
+> 生存链、寻路缓存和物理动作工具全部停用；本包只注册感知与编排白名单，
+> 身体执行归 Momo 的唯一任务总线。`com.dwinovo.numen` 包、`config/numen/**`、
+> 世界存档和协议契约仍作为注明来源的 GNU LGPL v3.0 兼容 ABI 保留。
+
 <div align="center">
 
 # Numen · 言出法随
@@ -27,7 +33,10 @@
 
 > 当前分支：`momo/server-agent`
 >
-> 基于 [Dwinovo/minecraft-numen](https://github.com/Dwinovo/minecraft-numen) 的 Forge 1.20.1 分支继续开发；假玩家身体、寻路、工具、调度器与美术资源均来自 Numen。本分支保留上游仓库、版权与许可证信息，并尽量通过公开接口扩展，方便继续合并上游更新。
+> 基于 [Dwinovo/minecraft-numen](https://github.com/Dwinovo/minecraft-numen)
+> 的 Forge 1.20.1 代码迁移而来。托管服务器上，本仓库不再拥有假玩家身体、
+> 寻路、物理任务或生存反射；它保留模型 harness、协议和只读感知能力。
+> 上游版权、许可证、历史资源名与兼容数据路径均继续保留。
 
 这个分支把高层 Agent 从玩家客户端搬到了 Minecraft 专用服务器旁边：即使所有真人都下线，Momo 的身体、记忆与大脑仍然可以留在世界中运行。模型由独立的 `server-brain` 进程通过回环 MCP 驱动，Minecraft 主线程不会等待模型响应。当前默认采用 `supervised` 模式：没有玩家或测试指令时不会自行开启新目标。
 
@@ -264,7 +273,7 @@ Numen 出厂的每一个工具、每一篇技能，全部只用公共 API 写成
 
 ```gradle
 repositories { maven { url = 'https://raw.githubusercontent.com/Dwinovo/numen-maven/main' } }
-dependencies  { modImplementation "com.dwinovo.numen:numen-api-fabric-1.21.1:<version>" }
+dependencies  { modImplementation "com.dwinovo.numen:momo-engine-fabric-1.21.1:<version>" }
 ```
 
 面向集成的公共对接 API 采用 **MIT** 授权——写工具、写技能、写兼容，不必被 LGPL 牵着走。上手指南、完整示例与版本矩阵，见 [numen-api 的 README](https://github.com/Dwinovo/numen-api)。
