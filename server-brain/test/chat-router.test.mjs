@@ -162,6 +162,49 @@ test("Chinese requests choose the narrowest safe capability phase", () => {
   }
 });
 
+test("questions about the companion's current home require live orientation", () => {
+  for (const [id, message] of [
+    [23, "桃桃，你现在有地方住吗"],
+    [24, "桃桃，你的房子在哪里？"],
+    [25, "momo 你自己的基地还在吗"],
+    [26, "桃桃，你现在有自己的房子吗？"],
+  ]) {
+    const decision = deterministicDecision({
+      id,
+      type: "player_chat",
+      playerName: "Alex",
+      message,
+    });
+    assert.equal(decision?.route, "act", message);
+    assert.equal(decision?.reply, "", message);
+    assert.equal(decision?.capability_hint, "orient", message);
+  }
+});
+
+test("home existence matching does not consume plans or availability questions", () => {
+  for (const [id, message] of [
+    [27, "桃桃，你现在有没有时间帮我建个房子"],
+    [28, "桃桃，你现在有什么房子设计想法"],
+    [29, "桃桃，你有没有想法造一个基地"],
+  ]) {
+    const decision = deterministicDecision({
+      id,
+      type: "player_chat",
+      playerName: "Alex",
+      message,
+    });
+    assert.equal(decision, null, message);
+  }
+  const planning = deterministicDecision({
+    id: 30,
+    type: "player_chat",
+    playerName: "Alex",
+    message: "桃桃，你的房子在哪里建比较好",
+  });
+  assert.equal(planning?.route, "act");
+  assert.equal(planning?.capability_hint, "structure");
+});
+
 test("explicit progress and correction messages continue the active goal", () => {
   for (const message of [
     "桃桃你卡住了",

@@ -93,6 +93,9 @@ final class StructureWorkflowAssessment {
         root.addProperty("name", workflow.name);
         root.addProperty("goal", workflow.goal);
         root.addProperty("owner_companion", workflow.ownerName);
+        if (workflow.dimensionId != null && !workflow.dimensionId.isBlank()) {
+            root.addProperty("dimension", workflow.dimensionId);
+        }
         root.addProperty("operation", demolition ? "demolish" : "build");
         root.addProperty("allow_replace", workflow.allowReplace);
         root.addProperty("saved_cells", workflow.cells.size());

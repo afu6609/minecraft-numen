@@ -31,15 +31,27 @@ const GAME_MODE_VALUES = new Map([
   ["冒险", "adventure"],
   ["旁观", "spectator"],
 ]);
+const NATURAL_COMMAND_PREFIX =
+  /^(?:顺便|请你?|麻烦你?|拜托你?|先|再)/u;
 
 function normalizedNames(names) {
   return new Set(names.map((name) => name.trim().toLocaleLowerCase()).filter(Boolean));
 }
 
+function normalizedNaturalBody(value) {
+  let body = value.replace(/\s+/gu, "");
+  let previous;
+  do {
+    previous = body;
+    body = body.replace(NATURAL_COMMAND_PREFIX, "");
+  } while (body !== previous);
+  return body;
+}
+
 function naturalCommand(message, playerName) {
   const addressed = message.trim().match(ADDRESSED);
   if (addressed == null) return null;
-  const body = addressed[1].replace(/\s+/gu, "");
+  const body = normalizedNaturalBody(addressed[1]);
 
   let match = body.match(
     /^(?:帮我)?(?:把)?(?:时间|天色)(?:设(?:置)?|调(?:整)?|改|切换?)(?:成|为|到)?(白天|天亮|夜晚|晚上|正午|中午|午夜)$/u,

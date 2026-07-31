@@ -434,6 +434,8 @@ export class MomoBrain {
         : null;
     this.trace = harness.trace ?? null;
     this.skillRunner = harness.skillRunner ?? null;
+    this.landmarkStore = harness.landmarkStore ?? null;
+    this.planningAckEnabled = harness.planningAckEnabled === true;
     this.turnTimeoutMs = Number.isInteger(harness.turnTimeoutMs)
       ? harness.turnTimeoutMs
       : 360_000;
@@ -1369,6 +1371,11 @@ export class MomoBrain {
               goalId: this.activeGoal?.goal_id ?? null,
             }) ?? []
           : [],
+      known_landmarks:
+        this.landmarkStore?.promptView({
+          query: this.activeGoal?.objective ?? "",
+          serverSessionId: this.serverSessionId,
+        }) ?? { revision: 0, landmarks: [] },
       budget: budgeted ? this.budget.promptView() : null,
     };
     if (isMainThread) this.fullCapsuleNext = false;
@@ -1474,6 +1481,11 @@ ${prompt}`;
         this.contextCapsule = new ContextCapsule();
       }
       this.contextCapsule.noteTurn(scoped.capsuleTurn);
+      await this.landmarkStore?.noteTurn(scoped.capsuleTurn, {
+        serverSessionId: authoritativeServerSessionId,
+        sourceEventKey: sourceKey,
+        objective: this.activeGoal?.objective ?? null,
+      });
       for (const entry of scoped.rejected) {
         this.trace?.record(
           entry.receipt == null
@@ -1612,6 +1624,42 @@ ${prompt}`;
     return true;
   }
 
+  async acknowledgePlanning(event, profile, epoch) {
+    if (
+      !this.planningAckEnabled ||
+      this.sendTrustedChat == null ||
+      epoch !== this.interruptEpoch
+    ) {
+      return false;
+    }
+    const message = {
+      structure: "收到，我先确认一下位置、结构和材料。",
+      regional_edit: "收到，我先确认一下目标区域。",
+      gather: "收到，我先确认一下目标和需要的工具。",
+      craft: "收到，我先看看配方和材料。",
+      survival: "收到，我先看一下现在的情况。",
+      combat_learning: "收到，我先观察一下它的动作。",
+      direct_action: "收到，我先确认一下目标。",
+      orient: "收到，我先看一下。",
+    }[profile] ?? "收到，我先看一下。";
+    try {
+      await this.sendTrustedChat(this.companion, message, {
+        kind: "planning_ack",
+        eventId: event?.id ?? null,
+        profile,
+      });
+      return epoch === this.interruptEpoch;
+    } catch (error) {
+      this.trace?.record("planning_ack.failed", {
+        goal_id: this.activeGoal?.goal_id ?? null,
+        trace_id: this.activeGoal?.trace_id ?? null,
+        profile,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   async acknowledgeQueuedGoal(event, epoch) {
     const message = "我还在处理上一件事，这条先记下了，忙完就接着来。";
     if (epoch !== this.interruptEpoch) return false;
@@ -1716,6 +1764,9 @@ ${prompt}`;
     const epoch = this.interruptEpoch;
     this.activePlayerGoalEpoch = epoch;
     try {
+      if (decision.route === "act") {
+        await this.acknowledgePlanning(event, profile, epoch);
+      }
       let turn = await this.runTurn(
         eventPrompt(
           this.companion,

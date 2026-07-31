@@ -89,6 +89,61 @@ function acceptedTaskWithoutChatTurn(
   };
 }
 
+test("an action gets a truthful planning ACK before a long model turn completes", async () => {
+  let releaseTurn;
+  let startedTurn;
+  const turnStarted = new Promise((resolve) => {
+    startedTurn = resolve;
+  });
+  const acked = [];
+  const brain = new MomoBrain(
+    () => ({
+      async run() {
+        startedTurn();
+        await new Promise((resolve) => {
+          releaseTurn = resolve;
+        });
+        return completedChatTurn();
+      },
+    }),
+    "momo",
+    "",
+    "supervised",
+    () => ({ revision: "static" }),
+    async (_companion, message, receipt) => {
+      acked.push({ message, receipt });
+    },
+    { planningAckEnabled: true },
+  );
+
+  const handling = brain.handle(
+    {
+      id: 6,
+      type: "player_chat",
+      playerName: "Alex",
+      playerUuid: "alex",
+      message: "建一个木屋",
+    },
+    {
+      id: 6,
+      route: "act",
+      reason: "build",
+      continues_goal: false,
+      capability_hint: "structure",
+    },
+  );
+  await turnStarted;
+
+  assert.equal(acked.length, 1);
+  assert.equal(acked[0].receipt.kind, "planning_ack");
+  assert.match(acked[0].message, /确认一下位置、结构和材料/);
+  assert.doesNotMatch(acked[0].message, /正在|开始建造|已经/);
+  assert.equal(brain.awaitingTaskIds.size, 0);
+
+  releaseTurn();
+  await handling;
+});
+
 test("Codex runtimes isolate the classifier and expose only Numen to the agent", () => {
   const constructed = [];
   class FakeCodex {

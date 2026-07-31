@@ -27,9 +27,71 @@ test("explicit and unambiguous natural command wording is intercepted", () => {
       reply: "好，时间调到白天了。",
     },
   );
+  assert.deepEqual(
+    parseServerCommandRequest(
+      { ...event, message: "桃桃顺便把时间设为白天" },
+      ["Haa258"],
+    ),
+    {
+      command: "/time set day",
+      authorized: true,
+      reply: "好，时间调到白天了。",
+    },
+  );
+  assert.deepEqual(
+    parseServerCommandRequest(
+      { ...event, message: "桃桃，请你把时间设为白天" },
+      ["Haa258"],
+    ),
+    {
+      command: "/time set day",
+      authorized: true,
+      reply: "好，时间调到白天了。",
+    },
+  );
+  assert.deepEqual(
+    parseServerCommandRequest(
+      { ...event, message: "桃桃，麻烦你顺便帮我把天气调成晴天" },
+      ["Haa258"],
+    ),
+    {
+      command: "/weather clear",
+      authorized: true,
+      reply: "好，天气调成晴天了。",
+    },
+  );
+  assert.deepEqual(
+    parseServerCommandRequest(
+      { ...event, message: "桃桃先把难度改成和平" },
+      ["Haa258"],
+    ),
+    {
+      command: "/difficulty peaceful",
+      authorized: true,
+      reply: "好，难度调成和平了。",
+    },
+  );
   assert.equal(
     parseServerCommandRequest(
       { ...event, message: "桃桃，现在是白天吗？" },
+      ["Haa258"],
+    ),
+    null,
+  );
+  for (const message of [
+    "桃桃顺便问一下现在是不是白天",
+    "桃桃先别把时间设为白天",
+    "桃桃顺便把时间设为白天然后把我切创造",
+  ]) {
+    assert.equal(
+      parseServerCommandRequest({ ...event, message }, ["Haa258"]),
+      null,
+      message,
+    );
+  }
+  assert.equal(
+    parseServerCommandRequest(
+      { ...event, type: "console_chat", message: "桃桃顺便把时间设为白天" },
       ["Haa258"],
     ),
     null,

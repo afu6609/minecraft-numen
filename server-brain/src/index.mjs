@@ -10,6 +10,7 @@ import { EventInbox } from "./event-inbox.mjs";
 import { ExperienceStore } from "./experience-store.mjs";
 import { HarnessMcpServer } from "./harness-mcp-server.mjs";
 import { HarnessTrace } from "./harness-trace.mjs";
+import { LandmarkStore } from "./landmark-store.mjs";
 import { NumenMcpClient } from "./mcp-client.mjs";
 import { SkillRunner } from "./skill-runner.mjs";
 import { GAMEPLAY_ENABLED_TOOLS } from "./tool-capabilities.mjs";
@@ -201,6 +202,14 @@ export async function run({
     maxBytes: config.traceMaxMb * 1024 * 1024,
   });
   let brain = null;
+  const landmarkStore = await LandmarkStore.open(config.landmarkFile, {
+    worldKey: config.worldKey,
+    companion: config.companion,
+    onError: (error) =>
+      log("warn", "landmark checkpoint failed", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
   const inbox = new EventInbox({
     restored: compatibleRestoredState
       ? stateStore.restoredInbox()
@@ -283,6 +292,8 @@ export async function run({
       durableCheckpoint: () => stateStore.flush(),
       trace,
       skillRunner,
+      landmarkStore,
+      planningAckEnabled: true,
     },
   );
   const { router } = runtimes;

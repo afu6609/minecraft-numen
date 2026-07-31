@@ -151,9 +151,22 @@ function addressedMessage(event, aliases) {
     .trim();
 }
 
+function liveWorldQuestion(message) {
+  const compact = message.replace(/\s+/gu, "");
+  return (
+    /^(?:(?:我想问(?:问)?|想问(?:问)?|问一下)[,，]?)?(?:你|桃桃)?(?:现在|目前|这会儿)?(?:有|有没有|还有|是否有)(?:(?:一个|一间|一座|几(?:个|间|座)?|多少(?:个|间|座)?|自己的|属于自己的|固定的|新的|能住的|可以住的|可住的|能睡的|可以睡的|安全的|现成的|已经建好的)){0,3}(?:地方住|住的地方|睡觉的地方|房子住|住处|住所|房子|房屋|屋子|家|基地|床)(?:吗|呢|了|呀|啊)?[?？!！。]*$/u.test(
+      compact,
+    ) ||
+    /^(?:(?:我想问(?:问)?|想问(?:问)?|问一下)[,，]?)?(?:你的|你自己的|你现在的|你)?(?:家|房子|房屋|屋子|住处|住所|基地)(?:在哪(?:里|儿)?|(?:位置|坐标)(?:在哪(?:里|儿)?|是(?:多少|什么))?|还在吗|怎么样|是什么样(?:的)?)(?:呢|呀|啊)?[?？!！。]*$/u.test(
+      compact,
+    )
+  );
+}
+
 function directActionRequest(message) {
   const compact = message.replace(/\s+/gu, "");
   if (compact === "") return false;
+  if (liveWorldQuestion(compact)) return true;
   if (
     /(?:卡住|不动|没动|走不动|做错|弄错|失败|怎么还|为什么还|进度|做到哪|在哪(?:里|儿)?|坐标|位置|血量|生命值|饥饿|背包|装备|状态|附近|周围|安全吗|怎么了)/iu.test(
       compact,
@@ -288,6 +301,7 @@ export function deterministicDecision(
       capability_hint: "conversation",
     };
   }
+  const asksAboutLiveWorld = liveWorldQuestion(message);
   if (directActionRequest(message)) {
     return {
       id: event.id,
@@ -299,7 +313,9 @@ export function deterministicDecision(
       reply: "",
       fastReply: false,
       continues_goal: continuationRequest(message),
-      capability_hint: deterministicCapabilityHint(message),
+      capability_hint: asksAboutLiveWorld
+        ? "orient"
+        : deterministicCapabilityHint(message),
     };
   }
   return null;

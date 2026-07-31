@@ -125,6 +125,14 @@ test("phase profiles are bounded subsets with only intentional omissions", () =>
     intentionallyHidden,
   );
   assert.deepEqual(GAMEPLAY_TOOL_PROFILES.conversation, ["send_chat"]);
+  assert.equal(
+    GAMEPLAY_TOOL_PROFILES.orient.includes("structure_status"),
+    true,
+  );
+  assert.equal(
+    GAMEPLAY_TOOL_PROFILES.orient.includes("interact_at"),
+    false,
+  );
 });
 
 test("movement-capable action profiles expose symmetric navigation control", () => {

@@ -23,6 +23,11 @@ test("configuration defaults to loopback and split models", () => {
     config.modelStateFile,
     path.join(config.workingDirectory, "runtime", "model-selection.json"),
   );
+  assert.equal(
+    config.landmarkFile,
+    path.join(config.workingDirectory, "runtime", "landmarks.json"),
+  );
+  assert.equal(config.worldKey, "momo-private-world");
 });
 
 test("activity mode is supervised by default and explicitly opt-in autonomous", () => {

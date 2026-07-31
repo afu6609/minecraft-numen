@@ -121,7 +121,7 @@ export const GAMEPLAY_TOOL_PROFILES = Object.freeze({
     "embodied_nav_status",
     "embodied_nav_stop",
     "follow_player",
-    "interact_at",
+    "structure_status",
   ]),
   reconcile: Object.freeze([
     "send_chat",

@@ -158,5 +158,10 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
       workingDirectory,
       env.MOMO_EXPERIENCE_DIRECTORY?.trim() || "runtime/skills",
     ),
+    landmarkFile: path.resolve(
+      workingDirectory,
+      env.MOMO_LANDMARK_FILE?.trim() || "runtime/landmarks.json",
+    ),
+    worldKey: nonEmpty(env, "MOMO_WORLD_KEY", "momo-private-world"),
   });
 }
